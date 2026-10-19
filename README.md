@@ -17,7 +17,7 @@ NPC Internet is a local, deterministic civilization simulator. One hundred ficti
 
 ## Prerequisites
 
-- Python 3.12.8 (`backend/.python-version`)
+- Python 3.12.8 (`backend/.python-version`); compatible Python 3.12–3.14 releases are supported
 - Node.js 22.22.0 (`frontend/.nvmrc`)
 - npm; Docker is optional
 
