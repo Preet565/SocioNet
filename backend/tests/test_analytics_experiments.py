@@ -11,6 +11,11 @@ def test_analytics_calculates_population_and_action_metrics() -> None:
     assert metrics.population == 100
     assert metrics.total_contents == len(simulation.state.contents)
     assert metrics.engagement_rate >= 0
+    assert metrics.exposure_rate >= 0
+    assert metrics.reshare_rate >= 0
+    assert 0 <= metrics.correction_reach <= 1
+    assert 0 <= metrics.community_fragmentation <= 1
+    assert "top_10_percent" in metrics.influence_distribution
     assert metrics.topic_metrics
 
 

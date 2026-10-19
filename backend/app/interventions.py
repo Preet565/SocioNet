@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from app.models import Intervention, InterventionKind, Relationship, ScheduledIntervention, SimulationState
+from app.models import (
+    Intervention,
+    InterventionKind,
+    InterventionRecord,
+    Relationship,
+    ScheduledIntervention,
+    SimulationState,
+)
 from app.simulation import append_content
 
 
@@ -38,8 +45,30 @@ def apply_intervention(state: SimulationState, intervention: Intervention) -> st
                 intervention=intervention,
             )
         )
+        state.intervention_history.append(
+            InterventionRecord(
+                intervention_id=intervention_id,
+                kind=intervention.kind,
+                topic=intervention.topic,
+                text=intervention.text,
+                created_tick=state.tick,
+                apply_at_tick=state.tick + intervention.delay_ticks,
+            )
+        )
         return intervention_id
     apply_now(state, intervention, intervention_id=intervention_id)
+    state.intervention_history.append(
+        InterventionRecord(
+            intervention_id=intervention_id,
+            kind=intervention.kind,
+            topic=intervention.topic,
+            text=intervention.text,
+            created_tick=state.tick,
+            apply_at_tick=state.tick,
+            applied_tick=state.tick,
+            status="applied",
+        )
+    )
     return intervention_id
 
 

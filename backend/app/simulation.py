@@ -19,7 +19,7 @@ from app.models import (
     SimulationConfig,
     SimulationState,
 )
-from app.relationships import record_interaction, set_following
+from app.relationships import record_interaction, relationship_for, set_following
 from app.utils import rng_for
 
 
@@ -35,6 +35,26 @@ class ActionResult:
 def create_initial_state(seed: int = 20261016, *, count: int = 100) -> SimulationState:
     agents = create_citizens(seed, count=count)
     communities = create_communities(seed, agents)
+    # Give the opening frame a real, sparse topology instead of an empty graph.
+    # These are seeded affinity signals, not interactions: later ticks can still
+    # strengthen, weaken, follow, or abandon them through the normal lifecycle.
+    for agent in agents.values():
+        peers = sorted(
+            (
+                peer
+                for peer in agents.values()
+                if peer.id != agent.id and set(agent.community_ids).intersection(peer.community_ids)
+            ),
+            key=lambda peer: peer.id,
+        )
+        rng = rng_for(seed, "relationship", agent.id)
+        for peer in peers:
+            if len(agent.relationships) >= 10:
+                break
+            if rng.random() < 0.16:
+                relationship = relationship_for(agent, peer.id)
+                relationship.affinity = round((agent.ideology + peer.ideology) / 2 * 0.35, 4)
+                relationship.trust = round((agent.trust_baseline + peer.trust_baseline) / 2, 4)
     return SimulationState(
         seed=seed,
         agents=agents,
@@ -97,6 +117,10 @@ class Simulation:
 
         for scheduled in sorted(due, key=lambda item: (item.apply_at_tick, item.intervention_id)):
             apply_now(self.state, scheduled.intervention, intervention_id=scheduled.intervention_id)
+            for record in self.state.intervention_history:
+                if record.intervention_id == scheduled.intervention_id:
+                    record.applied_tick = self.state.tick
+                    record.status = "applied"
             self.state.scheduled_interventions.remove(scheduled)
 
     def _run_agent_lifecycle(self, agent: Agent) -> None:

@@ -36,3 +36,31 @@ def test_api_returns_validation_error_for_invalid_intervention(tmp_path) -> None
         assert response.status_code == 422
     finally:
         app.state.service = original
+
+
+def test_browser_projection_exposes_real_citizens_graph_and_experiment_result(tmp_path) -> None:
+    original = app.state.service
+    app.state.service = SimulationService(seed=90, database_path=str(tmp_path / "projection.sqlite3"))
+    try:
+        client = TestClient(app)
+        state = client.get("/state?universe_id=prime")
+        assert state.status_code == 200
+        payload = state.json()
+        assert payload["metrics"]["population"] == 100
+        assert len(payload["citizens"]) == 100
+        assert len(payload["nodes"]) == 100
+        assert payload["edges"]
+
+        detail = client.get("/citizens/citizen-001?universe_id=prime")
+        assert detail.status_code == 200
+        assert detail.json()["decisionTrace"] == []
+
+        result = client.post(
+            "/experiments/run",
+            json={"universe_id": "prime", "experiment_id": "rumor-counterevidence"},
+        )
+        assert result.status_code == 200
+        assert result.json()["earliest_divergence"] is not None
+        assert "average_belief_confidence" in result.json()["metric_deltas"]
+    finally:
+        app.state.service = original

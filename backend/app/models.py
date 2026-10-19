@@ -151,6 +151,18 @@ class ScheduledIntervention(BaseModel):
     intervention: "Intervention"
 
 
+class InterventionRecord(BaseModel):
+    intervention_id: str
+    kind: InterventionKind
+    topic: str | None = None
+    text: str | None = None
+    created_tick: int = Field(ge=0)
+    apply_at_tick: int = Field(ge=0)
+    applied_tick: int | None = Field(default=None, ge=0)
+    status: str = "scheduled"
+    source: str = "operator"
+
+
 class Intervention(BaseModel):
     """Validated input for deterministic changes to a running simulation."""
 
@@ -207,6 +219,7 @@ class SimulationState(BaseModel):
     events: list[ActionEvent] = Field(default_factory=list)
     scheduled_interventions: list[ScheduledIntervention] = Field(default_factory=list)
     applied_interventions: list[str] = Field(default_factory=list)
+    intervention_history: list[InterventionRecord] = Field(default_factory=list)
     config: SimulationConfig = Field(default_factory=SimulationConfig)
 
 
@@ -238,6 +251,12 @@ class Metrics(BaseModel):
     polarization: float
     belief_accuracy: float
     engagement_rate: float
+    exposure_rate: float = 0.0
+    reshare_rate: float = 0.0
+    correction_reach: float = 0.0
+    community_fragmentation: float = 0.0
+    influence_distribution: dict[str, float] = Field(default_factory=dict)
+    time_until_claim_stops_spreading: int = 0
     topic_metrics: dict[str, dict[str, float | int]] = Field(default_factory=dict)
 
 
