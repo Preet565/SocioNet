@@ -10,6 +10,7 @@ NPC Internet is a local, deterministic civilization simulator. One hundred ficti
 - Belief updates that use evidence truth labels, credibility, skepticism, and source trust; popularity is not treated as proof.
 - Sparse seeded social graph that changes through interactions and relationship updates.
 - Bounded discrete ticks, delayed interventions, reproducible branch execution, and SQLite snapshot persistence.
+- Durable experiment runs with explicit source/control/treatment snapshot provenance, additive SQLite schema migration, and canonical Prime filtering.
 - FastAPI projections for overview, graph, citizens, feed, event stream, interventions, minds, metrics, export, and experiments.
 - Butterfly Lab catalog with the **One rumor, two universes** scenario: a false fictional civic-event claim is run against a delayed credible counterevidence branch from the same snapshot.
 - Dark, responsive React command center with actual API-driven SVG topology, profiles, feed, trace explorer, metrics, and comparison readouts.
@@ -81,7 +82,7 @@ cd frontend && npm run build
 2. Select **Civilization Overview** and click **Reset both / run demo flow** or the prominent **Run the demo flow** button.
 3. The UI resets Prime and Echo, advances the synchronized starting frame, and requests the backend's `rumor-counterevidence` experiment.
 4. Open **Butterfly Lab**. The result card shows the actual seed, branch tick count, calculated metric deltas, and earliest recorded divergence. Before the run, no result is shown.
-5. Use **One rumor, two universes → Run experiment** to rerun it. The scenario forks an identical serialized snapshot; control gets only the unverified fictional claim while treatment receives credible counterevidence after two ticks.
+5. Use **One rumor, two universes → Run experiment** to rerun it. The scenario forks an identical serialized snapshot; control gets only the unverified fictional claim while treatment receives credible counterevidence after two ticks. The durable run history shows the source and branch snapshot tags and provides an export link.
 6. Open **Information Ecosystem** to inspect actual posts, claim status, credibility, exposure counts, and the event stream. Open **Social Universe** to see graph nodes and relationship edges derived from the state.
 7. Select a citizen in **Citizen Observatory** for beliefs, memories, relationships, interests, recent decisions, and the executed trace. **Agent Mind Explorer** exposes structured decision evidence, not fabricated hidden chain-of-thought.
 8. In **Intervention Console**, pause naturally at a tick boundary, select a supported intervention, enter a rationale, apply it to Prime or Echo, then advance a tick and inspect its event and belief effects.
@@ -92,6 +93,20 @@ Canonical API experiment request:
 curl -X POST http://127.0.0.1:8000/experiments/run \
   -H 'content-type: application/json' \
   -d '{"universe_id":"prime","experiment_id":"rumor-counterevidence"}'
+```
+
+Durable experiment-run endpoints:
+
+```sh
+# Create a catalog run (the legacy /experiments/run endpoint remains supported)
+curl -X POST http://127.0.0.1:8000/experiment-runs \
+  -H 'content-type: application/json' \
+  -d '{"universe_id":"prime","experiment_id":"rumor-counterevidence"}'
+
+# List, retrieve, or export saved runs
+curl 'http://127.0.0.1:8000/experiment-runs?universe_id=prime'
+curl http://127.0.0.1:8000/experiment-runs/<run-id>
+curl -OJ http://127.0.0.1:8000/experiment-runs/<run-id>/export
 ```
 
 To replay from the initial seed, click the reset controls or call:
@@ -111,6 +126,7 @@ curl -X POST http://127.0.0.1:8000/reset \
 - `GET /analytics`
 - `GET /citizens`, `GET /citizens/{citizen_id}`
 - `GET /experiments`, `POST /experiments/run`, `POST /experiments/side-by-side`
+- `POST /experiment-runs` (also `/experiments/runs`) to create a durable run; `GET` on the same collection and `/{run_id}` to list/retrieve; `/{run_id}/export` to download its JSON provenance/result record
 - `POST /interventions`
 - `GET /traces`, `GET /export/json`
 - `POST /state/save`, `POST /state/load`
@@ -144,6 +160,6 @@ Open <http://127.0.0.1:8080>. If Docker Desktop is not running, use the local co
 
 - The citizens are deterministic rule-based agents, not general language models. Their text is intentionally bounded and fictional.
 - The graph layout is deterministic seeded geometry for a stable SVG view, not a physics solver; topology and edge weights are real state.
-- The current experiment API retains branch results in process memory and persists the source snapshots, not a full experiment-results table across server restarts.
-- SQLite persistence currently promises the canonical Prime snapshot; the Echo branch is an in-memory counterfactual until it is saved through the canonical snapshot endpoint.
+- Experiment branch execution remains an in-process deterministic calculation, while its result, status, and tagged source/control/treatment snapshots are now durable in SQLite. The JSON fallback keeps the canonical file contract and writes tagged experiment artifacts and run records to sidecars.
+- Canonical state loading is filtered to `provenance=canonical` and `universe_id=prime`; experiment snapshots cannot replace Prime through the existing state-load path.
 - Metrics are synthetic measurements of a fictional population and must not be interpreted as evidence about real people or communities.

@@ -3,6 +3,8 @@ import type {
   Citizen,
   Experiment,
   ExperimentComparison,
+  ExperimentRun,
+  SnapshotProvenance,
   HealthResponse,
   InformationSource,
   InterventionRecord,
@@ -170,6 +172,60 @@ const normalizeExperiment = (value: unknown, index: number): Experiment => {
     variables: arrayOr(pick(record, ['variables', 'parameters'])).map((variable) => String(variable)),
     projectedImpact: stringOr(pick(record, ['projected_impact', 'impact']), 'Awaiting model output'),
     lastRun: typeof pick(record, ['last_run', 'lastRun']) === 'string' ? pick(record, ['last_run', 'lastRun']) as string : undefined,
+    lastRunId: typeof pick(record, ['last_run_id', 'lastRunId']) === 'string' ? pick(record, ['last_run_id', 'lastRunId']) as string : undefined,
+    lastRunStatus: typeof pick(record, ['last_run_status', 'lastRunStatus']) === 'string' ? pick(record, ['last_run_status', 'lastRunStatus']) as string : undefined,
+  }
+}
+
+const normalizeComparison = (value: unknown): ExperimentComparison => {
+  const record = asRecord(value) ?? {}
+  return {
+    experiment_id: stringOr(pick(record, ['experiment_id', 'experimentId']), 'experiment'),
+    universe_id: stringOr(pick(record, ['universe_id', 'universeId']), 'prime') as UniverseId,
+    seed: numberOr(pick(record, ['seed']), 0),
+    ticks: numberOr(pick(record, ['ticks']), 0),
+    control_metrics: (asRecord(pick(record, ['control_metrics', 'controlMetrics'])) ?? {}) as unknown as ExperimentComparison['control_metrics'],
+    treatment_metrics: (asRecord(pick(record, ['treatment_metrics', 'treatmentMetrics'])) ?? {}) as unknown as ExperimentComparison['treatment_metrics'],
+    metric_deltas: (asRecord(pick(record, ['metric_deltas', 'metricDeltas'])) ?? {}) as Record<string, number>,
+    earliest_divergence: (asRecord(pick(record, ['earliest_divergence', 'earliestDivergence'])) ?? null) as Record<string, unknown> | null,
+    run_id: typeof pick(record, ['run_id', 'runId']) === 'string' ? pick(record, ['run_id', 'runId']) as string : undefined,
+    status: typeof pick(record, ['status']) === 'string' ? pick(record, ['status']) as string : undefined,
+  }
+}
+
+const normalizeSnapshot = (value: unknown): SnapshotProvenance | undefined => {
+  const record = asRecord(value)
+  if (!record) return undefined
+  return {
+    snapshotId: numberOr(pick(record, ['snapshot_id', 'snapshotId']), 0),
+    seed: numberOr(pick(record, ['seed']), 0),
+    tick: numberOr(pick(record, ['tick']), 0),
+    createdAt: typeof pick(record, ['created_at', 'createdAt']) === 'string' ? pick(record, ['created_at', 'createdAt']) as string : null,
+    provenance: stringOr(pick(record, ['provenance', 'source']), 'unknown'),
+    universeId: stringOr(pick(record, ['universe_id', 'universeId']), 'prime') as UniverseId,
+    experimentRunId: typeof pick(record, ['experiment_run_id', 'experimentRunId']) === 'string' ? pick(record, ['experiment_run_id', 'experimentRunId']) as string : null,
+  }
+}
+
+const normalizeExperimentRun = (value: unknown): ExperimentRun => {
+  const record = asRecord(value) ?? {}
+  const rawStatus = stringOr(pick(record, ['status']), 'created')
+  const allowedStatuses: ExperimentRun['status'][] = ['created', 'running', 'completed', 'failed']
+  return {
+    runId: stringOr(pick(record, ['run_id', 'runId']), 'unknown-run'),
+    experimentId: stringOr(pick(record, ['experiment_id', 'experimentId']), 'experiment'),
+    universeId: stringOr(pick(record, ['universe_id', 'universeId']), 'prime') as UniverseId,
+    status: allowedStatuses.includes(rawStatus as ExperimentRun['status']) ? rawStatus as ExperimentRun['status'] : 'failed',
+    seed: numberOr(pick(record, ['seed']), 0),
+    sourceTick: numberOr(pick(record, ['source_tick', 'sourceTick']), 0),
+    ticks: numberOr(pick(record, ['ticks']), 0),
+    createdAt: stringOr(pick(record, ['created_at', 'createdAt']), new Date().toISOString()),
+    updatedAt: stringOr(pick(record, ['updated_at', 'updatedAt']), new Date().toISOString()),
+    sourceSnapshot: normalizeSnapshot(pick(record, ['source_snapshot', 'sourceSnapshot'])),
+    controlSnapshot: normalizeSnapshot(pick(record, ['control_snapshot', 'controlSnapshot'])),
+    treatmentSnapshot: normalizeSnapshot(pick(record, ['treatment_snapshot', 'treatmentSnapshot'])),
+    result: asRecord(pick(record, ['result'])) ? normalizeComparison(pick(record, ['result'])) : undefined,
+    error: typeof pick(record, ['error']) === 'string' ? pick(record, ['error']) as string : undefined,
   }
 }
 
@@ -290,5 +346,14 @@ export const api = {
   tick: (universeId: UniverseId, steps = 1) => request<unknown>('/tick', { method: 'POST', body: JSON.stringify({ universe_id: universeId, steps }) }),
   reset: (universeId: UniverseId) => request<unknown>('/reset', { method: 'POST', body: JSON.stringify({ universe_id: universeId }) }),
   runExperiment: (universeId: UniverseId, experimentId: string) => request<ExperimentComparison>('/experiments/run', { method: 'POST', body: JSON.stringify({ universe_id: universeId, experiment_id: experimentId }) }),
+  createExperimentRun: async (universeId: UniverseId, experimentId: string) => normalizeExperimentRun(await request<unknown>('/experiment-runs', { method: 'POST', body: JSON.stringify({ universe_id: universeId, experiment_id: experimentId }) })),
+  getExperimentRuns: async (universeId?: UniverseId) => {
+    const query = universeId ? `?universe_id=${encodeUniverse(universeId)}` : ''
+    const payload = await request<unknown>(`/experiment-runs${query}`)
+    const root = unwrap(payload)
+    return arrayOr(root.runs ?? payload).map(normalizeExperimentRun)
+  },
+  getExperimentRun: async (runId: string) => normalizeExperimentRun(await request<unknown>(`/experiment-runs/${encodeURIComponent(runId)}`)),
+  experimentRunExportUrl: (runId: string) => `${API_URL}/experiment-runs/${encodeURIComponent(runId)}/export`,
   intervene: (universeId: UniverseId, input: { action: string; target: string; intensity: number; rationale: string }) => request<unknown>('/interventions', { method: 'POST', body: JSON.stringify({ universe_id: universeId, ...input }) }),
 }

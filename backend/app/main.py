@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +27,13 @@ from app.models import (
     SimulationState,
     TickRequest,
 )
-from app.persistence import StateStore, export_json
+from app.persistence import (
+    EXPERIMENT_CONTROL_PROVENANCE,
+    EXPERIMENT_SOURCE_PROVENANCE,
+    EXPERIMENT_TREATMENT_PROVENANCE,
+    StateStore,
+    export_json,
+)
 from app.presentation import EXPERIMENT_CATALOG, citizen_view, frontend_state
 from app.simulation import Simulation
 
@@ -51,6 +60,13 @@ class ConsoleInterventionRequest(UniverseRequest):
 
 class ExperimentRunRequest(UniverseRequest):
     experiment_id: str = Field(min_length=1, max_length=80)
+
+
+class ExperimentRunCreateRequest(UniverseRequest):
+    experiment_id: str = Field(min_length=1, max_length=80)
+    ticks: int = Field(default=6, ge=1, le=50)
+    control_interventions: list[Intervention] = Field(default_factory=list)
+    treatment_interventions: list[Intervention] = Field(default_factory=list)
 
 
 class SimulationService:
@@ -133,6 +149,128 @@ class SimulationService:
             self.universes["prime"] = self.simulation
             return self.state
 
+    def catalog_statuses(self, universe_id: str) -> dict[str, dict[str, Any]]:
+        """Return latest durable run status for each catalog experiment."""
+
+        statuses: dict[str, dict[str, Any]] = {}
+        for run in self.store.list_experiment_runs(universe_id):
+            experiment_id = str(run.get("experiment_id", ""))
+            if experiment_id not in statuses:
+                raw_status = str(run.get("status", ""))
+                catalog_status = {
+                    "completed": "complete",
+                    "running": "running",
+                    "created": "running",
+                    "failed": "paused",
+                }.get(raw_status, "ready")
+                statuses[experiment_id] = {
+                    "status": catalog_status,
+                    "last_run": run.get("updated_at") or run.get("created_at"),
+                    "run_id": run.get("run_id"),
+                    "run_status": raw_status,
+                }
+        return statuses
+
+    def create_experiment_run(
+        self,
+        *,
+        universe_id: str,
+        experiment_id: str,
+        ticks: int,
+        control_interventions: list[Intervention] | None = None,
+        treatment_interventions: list[Intervention] | None = None,
+    ) -> dict[str, Any]:
+        """Run and persist one reproducible experiment with tagged snapshots."""
+
+        with self.lock:
+            source = self.universe(universe_id).state.model_copy(deep=True)
+            run_id = uuid4().hex
+            created_at = datetime.now(timezone.utc).isoformat()
+            source_snapshot_id = self.store.save(
+                source,
+                provenance=EXPERIMENT_SOURCE_PROVENANCE,
+                universe_id=universe_id,
+                experiment_run_id=run_id,
+            )
+            record: dict[str, Any] = {
+                "run_id": run_id,
+                "experiment_id": experiment_id,
+                "universe_id": universe_id,
+                "status": "running",
+                "seed": source.seed,
+                "source_tick": source.tick,
+                "ticks": ticks,
+                "source_snapshot_id": source_snapshot_id,
+                "control_snapshot_id": None,
+                "treatment_snapshot_id": None,
+                "created_at": created_at,
+                "updated_at": created_at,
+                "source_snapshot": self._snapshot_reference(source_snapshot_id, EXPERIMENT_SOURCE_PROVENANCE),
+            }
+            self.store.save_experiment_run(record)
+            try:
+                if control_interventions is None and treatment_interventions is None:
+                    control, treatment = catalog_interventions(source, experiment_id)
+                else:
+                    control = control_interventions or []
+                    treatment = treatment_interventions or []
+                result = run_side_by_side(
+                    source,
+                    ticks=ticks,
+                    control_interventions=control,
+                    treatment_interventions=treatment,
+                )
+                control_snapshot_id = self.store.save(
+                    result.control,
+                    provenance=EXPERIMENT_CONTROL_PROVENANCE,
+                    universe_id=universe_id,
+                    experiment_run_id=run_id,
+                )
+                treatment_snapshot_id = self.store.save(
+                    result.treatment,
+                    provenance=EXPERIMENT_TREATMENT_PROVENANCE,
+                    universe_id=universe_id,
+                    experiment_run_id=run_id,
+                )
+                legacy_result = experiment_result_payload(result, experiment_id, universe_id)
+                updated_at = datetime.now(timezone.utc).isoformat()
+                record.update(
+                    {
+                        "status": "completed",
+                        "control_snapshot_id": control_snapshot_id,
+                        "treatment_snapshot_id": treatment_snapshot_id,
+                        "control_snapshot": self._snapshot_reference(control_snapshot_id, EXPERIMENT_CONTROL_PROVENANCE),
+                        "treatment_snapshot": self._snapshot_reference(treatment_snapshot_id, EXPERIMENT_TREATMENT_PROVENANCE),
+                        "result": legacy_result,
+                        "updated_at": updated_at,
+                    }
+                )
+                self.store.save_experiment_run(record)
+                self.experiment_runs[(universe_id, experiment_id)] = result
+                return record
+            except Exception as error:
+                record.update(
+                    {
+                        "status": "failed",
+                        "error": str(error),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                self.store.save_experiment_run(record)
+                raise
+
+    def _snapshot_reference(self, snapshot_id: int, provenance: str) -> dict[str, Any]:
+        metadata = self.store.snapshot_metadata(snapshot_id, provenance=provenance)
+        return {
+            "snapshot_id": metadata["snapshot_id"],
+            "seed": metadata["seed"],
+            "tick": metadata["tick"],
+            "created_at": metadata.get("created_at"),
+            "provenance": metadata["provenance"],
+            "universe_id": metadata["universe_id"],
+            "experiment_run_id": metadata.get("experiment_run_id"),
+        }
+
 
 app = FastAPI(
     title="NPC Internet: The Butterfly Effect",
@@ -153,6 +291,15 @@ def get_service(request: Request) -> SimulationService:
     return request.app.state.service
 
 
+def projected_state(service: SimulationService, universe_id: str) -> dict[str, Any]:
+    simulation_state = service.universe(universe_id).state
+    return frontend_state(
+        simulation_state,
+        universe_id,
+        experiment_statuses=service.catalog_statuses(universe_id),
+    )
+
+
 @app.get("/health")
 def health(request: Request) -> dict[str, object]:
     service = get_service(request)
@@ -169,8 +316,7 @@ def health(request: Request) -> dict[str, object]:
 def state(request: Request, universe_id: str | None = Query(default=None)) -> dict[str, Any] | SimulationState:
     service = get_service(request)
     if universe_id:
-        completed = {experiment_id for (run_universe, experiment_id) in service.experiment_runs if run_universe == universe_id}
-        return frontend_state(service.universe(universe_id).state, universe_id, completed)
+        return projected_state(service, universe_id)
     return service.state
 
 
@@ -183,7 +329,11 @@ def simulate_tick(payload: TickRequest, request: Request) -> SimulationState:
 def compatibility_tick(payload: UniverseTickRequest, request: Request) -> dict[str, Any]:
     service = get_service(request)
     simulation_state = service.tick_universe(payload.universe_id, payload.steps)
-    return frontend_state(simulation_state, payload.universe_id)
+    return frontend_state(
+        simulation_state,
+        payload.universe_id,
+        experiment_statuses=service.catalog_statuses(payload.universe_id),
+    )
 
 
 @app.post("/reset", response_model=None)
@@ -192,7 +342,11 @@ def compatibility_reset(payload: ResetRequest, request: Request) -> dict[str, An
     if payload.universe_id is None:
         return service.reset(payload.seed)
     simulation_state = service.reset_universe(payload.universe_id)
-    return frontend_state(simulation_state, payload.universe_id)
+    return frontend_state(
+        simulation_state,
+        payload.universe_id,
+        experiment_statuses=service.catalog_statuses(payload.universe_id),
+    )
 
 
 def _console_intervention(payload: ConsoleInterventionRequest) -> Intervention:
@@ -232,8 +386,11 @@ def intervention(payload: dict[str, object], request: Request) -> dict[str, Any]
             return service.apply(typed)
         console = ConsoleInterventionRequest.model_validate(payload)
         state = service.apply_universe(console.universe_id, _console_intervention(console))
-        completed = {experiment_id for (run_universe, experiment_id) in service.experiment_runs if run_universe == console.universe_id}
-        return frontend_state(state, console.universe_id, completed)
+        return frontend_state(
+            state,
+            console.universe_id,
+            experiment_statuses=service.catalog_statuses(console.universe_id),
+        )
     except (InterventionValidationError, ValidationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -260,8 +417,7 @@ def traces(
 @app.get("/citizens")
 def citizens(request: Request, universe_id: Literal["prime", "echo"] = "prime") -> dict[str, Any]:
     service = get_service(request)
-    completed = {experiment_id for (run_universe, experiment_id) in service.experiment_runs if run_universe == universe_id}
-    return {"citizens": frontend_state(service.universe(universe_id).state, universe_id, completed)["citizens"]}
+    return {"citizens": projected_state(service, universe_id)["citizens"]}
 
 
 @app.get("/citizens/{citizen_id}")
@@ -276,16 +432,12 @@ def citizen(citizen_id: str, request: Request, universe_id: Literal["prime", "ec
 @app.get("/experiments")
 def experiments(request: Request, universe_id: Literal["prime", "echo"] = "prime") -> dict[str, Any]:
     service = get_service(request)
-    completed = {experiment_id for (run_universe, experiment_id) in service.experiment_runs if run_universe == universe_id}
-    return {"experiments": frontend_state(service.universe(universe_id).state, universe_id, completed)["experiments"]}
+    return {"experiments": projected_state(service, universe_id)["experiments"]}
 
 
-@app.post("/experiments/run")
-def run_catalog_experiment(payload: ExperimentRunRequest, request: Request) -> dict[str, Any]:
-    service = get_service(request)
-    if payload.experiment_id not in {experiment["id"] for experiment in EXPERIMENT_CATALOG}:
-        raise HTTPException(status_code=404, detail=f"unknown experiment_id: {payload.experiment_id}")
-    snapshot = service.universe(payload.universe_id).state
+def catalog_interventions(snapshot: SimulationState, experiment_id: str) -> tuple[list[Intervention], list[Intervention]]:
+    """Build the small, documented catalog scenarios from one source frame."""
+
     topic = "fictional civic event"
     rumor = Intervention(
         kind="seed_post",
@@ -294,41 +446,132 @@ def run_catalog_experiment(payload: ExperimentRunRequest, request: Request) -> d
         truth_label=False,
         strength=0.65,
     )
-    if payload.experiment_id == "rumor-counterevidence":
+    if experiment_id == "rumor-counterevidence":
         control = [rumor]
-        treatment = [rumor, Intervention(
-            kind="counterevidence",
-            topic=topic,
-            text="SIMULATED EVIDENCE: the fictional civic ledger records no schedule change.",
-            truth_label=True,
-            strength=0.9,
-            delay_ticks=2,
-        )]
-    elif payload.experiment_id == "bridge-fact-check":
+        treatment = [
+            rumor,
+            Intervention(
+                kind="counterevidence",
+                topic=topic,
+                text="SIMULATED EVIDENCE: the fictional civic ledger records no schedule change.",
+                truth_label=True,
+                strength=0.9,
+                delay_ticks=2,
+            ),
+        ]
+    elif experiment_id == "bridge-fact-check":
         control = [rumor]
         treatment = [rumor, Intervention(kind="fact_check", topic=topic, strength=0.9)]
-    else:
+    elif experiment_id == "trust-shift":
         control = [rumor]
-        treatment = [rumor, Intervention(
-            kind="trust_shift",
-            target_agent_id=sorted(snapshot.agents)[0],
-            delta=0.2,
-        )]
-    try:
-        result = run_side_by_side(snapshot, ticks=6, control_interventions=control, treatment_interventions=treatment)
-    except InterventionValidationError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    service.experiment_runs[(payload.universe_id, payload.experiment_id)] = result
+        treatment = [
+            rumor,
+            Intervention(
+                kind="trust_shift",
+                target_agent_id=sorted(snapshot.agents)[0],
+                delta=0.2,
+            ),
+        ]
+    else:
+        raise ValueError(f"unknown experiment_id: {experiment_id}")
+    return control, treatment
+
+
+def experiment_result_payload(result: ExperimentResult, experiment_id: str, universe_id: str) -> dict[str, Any]:
+    payload = result.model_dump(mode="json")
+    payload.update(
+        {
+            "experiment_id": experiment_id,
+            "universe_id": universe_id,
+            "earliest_divergence": _earliest_divergence(result.control, result.treatment),
+        }
+    )
+    return payload
+
+
+def legacy_comparison_payload(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep the original /experiments/run response shape stable."""
+
     return {
-        "experiment_id": payload.experiment_id,
-        "universe_id": payload.universe_id,
-        "seed": result.seed,
-        "ticks": result.ticks,
-        "control_metrics": result.control_metrics.model_dump(mode="json"),
-        "treatment_metrics": result.treatment_metrics.model_dump(mode="json"),
-        "metric_deltas": result.metric_deltas,
-        "earliest_divergence": _earliest_divergence(result.control, result.treatment),
+        "experiment_id": result["experiment_id"],
+        "universe_id": result["universe_id"],
+        "seed": result["seed"],
+        "ticks": result["ticks"],
+        "control_metrics": result["control_metrics"],
+        "treatment_metrics": result["treatment_metrics"],
+        "metric_deltas": result["metric_deltas"],
+        "earliest_divergence": result["earliest_divergence"],
     }
+
+
+@app.post("/experiment-runs")
+@app.post("/experiments/runs")
+def create_experiment_run(payload: ExperimentRunCreateRequest, request: Request) -> dict[str, Any]:
+    service = get_service(request)
+    catalog_ids = {experiment["id"] for experiment in EXPERIMENT_CATALOG}
+    if payload.experiment_id not in catalog_ids and not (payload.control_interventions or payload.treatment_interventions):
+        raise HTTPException(status_code=404, detail=f"unknown experiment_id: {payload.experiment_id}")
+    try:
+        return service.create_experiment_run(
+            universe_id=payload.universe_id,
+            experiment_id=payload.experiment_id,
+            ticks=payload.ticks,
+            control_interventions=None if payload.experiment_id in catalog_ids and not (payload.control_interventions or payload.treatment_interventions) else payload.control_interventions,
+            treatment_interventions=None if payload.experiment_id in catalog_ids and not (payload.control_interventions or payload.treatment_interventions) else payload.treatment_interventions,
+        )
+    except (InterventionValidationError, ValidationError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.get("/experiment-runs")
+@app.get("/experiments/runs")
+def list_experiment_runs(
+    request: Request,
+    universe_id: Literal["prime", "echo"] | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> dict[str, Any]:
+    runs = get_service(request).store.list_experiment_runs(universe_id)
+    if status is not None:
+        runs = [run for run in runs if run.get("status") == status]
+    return {"runs": runs}
+
+
+@app.get("/experiment-runs/{run_id}/export")
+@app.get("/experiments/runs/{run_id}/export")
+def export_experiment_run(run_id: str, request: Request) -> Response:
+    run = get_service(request).store.get_experiment_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+    return Response(
+        content=json.dumps(run, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=socionet-experiment-{run_id}.json"},
+    )
+
+
+@app.get("/experiment-runs/{run_id}")
+@app.get("/experiments/runs/{run_id}")
+def get_experiment_run(run_id: str, request: Request) -> dict[str, Any]:
+    run = get_service(request).store.get_experiment_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+    return run
+
+
+@app.post("/experiments/run")
+def run_catalog_experiment(payload: ExperimentRunRequest, request: Request) -> dict[str, Any]:
+    service = get_service(request)
+    if payload.experiment_id not in {experiment["id"] for experiment in EXPERIMENT_CATALOG}:
+        raise HTTPException(status_code=404, detail=f"unknown experiment_id: {payload.experiment_id}")
+    try:
+        run = service.create_experiment_run(
+            universe_id=payload.universe_id,
+            experiment_id=payload.experiment_id,
+            ticks=6,
+        )
+    except (InterventionValidationError, ValidationError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return legacy_comparison_payload(run["result"])
 
 
 def _earliest_divergence(control: SimulationState, treatment: SimulationState) -> dict[str, Any] | None:
@@ -346,13 +589,15 @@ def _earliest_divergence(control: SimulationState, treatment: SimulationState) -
 def side_by_side(payload: ExperimentRequest, request: Request) -> ExperimentResult:
     service = get_service(request)
     try:
-        return run_side_by_side(
-            service.state,
+        run = service.create_experiment_run(
+            universe_id="prime",
+            experiment_id="side-by-side",
             ticks=payload.ticks,
             control_interventions=payload.control_interventions,
             treatment_interventions=payload.treatment_interventions,
         )
-    except InterventionValidationError as error:
+        return ExperimentResult.model_validate(run["result"])
+    except (InterventionValidationError, ValidationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 

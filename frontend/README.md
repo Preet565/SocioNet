@@ -30,9 +30,13 @@ The adapter in `src/api.ts` normalizes common snake_case and camelCase payloads.
 | POST | `/tick` | `{ universe_id, steps }` |
 | POST | `/reset` | `{ universe_id }` |
 | POST | `/experiments/run` | `{ universe_id, experiment_id }` |
+| POST | `/experiment-runs` | Create a durable experiment run with tagged provenance |
+| GET | `/experiment-runs?universe_id=...` | Durable run history and status |
+| GET | `/experiment-runs/:run_id` | Retrieve a saved result and snapshot provenance |
+| GET | `/experiment-runs/:run_id/export` | Download the saved run JSON |
 | POST | `/interventions` | `{ universe_id, action, target, intensity, rationale }` |
 
-The graph view is built from the returned `nodes` and `edges` arrays; it does not use a mock graph when the API is live.
+The graph view is built from the returned `nodes` and `edges` arrays; it does not use a mock graph when the API is live. Butterfly Lab loads durable history on entry and renders source/control/treatment snapshot tags with an export link. The catalog status in the state projection comes from the durable run record.
 
 ## Offline recovery path
 

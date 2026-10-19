@@ -6,7 +6,7 @@ The project is deliberately two local processes:
 
 - `backend/app/` owns the only mutable simulation state and exposes FastAPI.
 - `frontend/src/` owns view state and presentation; it never fabricates live results.
-- SQLite stores canonical Prime snapshots. The in-memory Echo branch and branch comparison are isolated from the canonical world until explicitly reset or saved.
+- SQLite stores canonical Prime snapshots, durable experiment run records, and tagged source/control/treatment artifacts. Canonical state loading filters on `provenance=canonical` and `universe_id=prime`, so a branch snapshot cannot replace Prime. The JSON fallback preserves the canonical single-file snapshot and uses sidecars for tagged experiment artifacts and runs.
 
 ## Simulation lifecycle
 
@@ -33,13 +33,15 @@ The trace contains execution facts and rule inputs. It does not claim to expose 
 - `interventions.py`: typed validation, immediate/delayed application, intervention history.
 - `experiments.py`: deep-copy fork from one snapshot and metric comparison.
 - `analytics.py`: event-derived metrics.
-- `persistence.py`: SQLite with JSON fallback.
+- `persistence.py`: additive SQLite schema migration, provenance-filtered snapshots, durable experiment runs, and JSON fallback.
 - `presentation.py`: read-only browser projections derived from state.
 - `main.py`: request validation, locking, API routes, and compatibility endpoints.
 
 ## Butterfly experiment
 
 `run_side_by_side()` deep-copies the exact input snapshot twice before applying any branch intervention. It then executes both simulations with the same seed and deterministic per-agent RNG derivation. The catalog demo applies the same false fictional seed post to both branches; Echo also gets true, high-credibility counterevidence at tick +2. The output includes calculated metrics and the first differing recorded event.
+
+Each API-created run first stores a tagged `experiment_source` snapshot, records `running` status, then stores `experiment_control` and `experiment_treatment` snapshots and updates the run to `completed`. Failed calculations remain as durable `failed` records. The catalog projection derives its status and last-run metadata from these records rather than process memory.
 
 ## Metrics
 

@@ -6,6 +6,7 @@ import type {
   Citizen,
   Experiment,
   ExperimentComparison,
+  ExperimentRun,
   InterventionRecord,
   NetworkNode,
   SelectedCitizen,
@@ -234,14 +235,15 @@ function HygieneRow({ index, title, text }: { index: string; title: string; text
   return <div className="hygiene-row"><span>{index}</span><div><strong>{title}</strong><p>{text}</p></div></div>
 }
 
-function ButterflyLabView({ state, otherState, comparison, runningId, onRun }: { state: UniverseState; otherState: UniverseState; comparison?: ExperimentComparison; runningId?: string; onRun: (experiment: Experiment) => void }) {
+function ButterflyLabView({ state, otherState, comparison, history, runningId, onRun }: { state: UniverseState; otherState: UniverseState; comparison?: ExperimentComparison; history: ExperimentRun[]; runningId?: string; onRun: (experiment: Experiment) => void }) {
   return <>
     <SectionHeader eyebrow="Counterfactuals / controlled change" title="Butterfly Lab" description="Run the same question against the current universe and record what moves." action={<StatusPill tone="violet"><Icon name="flask" size={13} /> reproducible experiments</StatusPill>} />
     <section className="panel lab-intro"><div className="lab-intro__mark"><Icon name="spark" size={23} /></div><div><span className="eyebrow">Method note</span><h3>A good experiment changes one thing you can name.</h3><p>Every run is attached to a universe, a tick, and an explicit set of variables. Use the two-universe demo to establish a shared starting frame before comparing outcomes.</p></div><div className="lab-intro__tick"><span>Selected tick</span><strong>{formatNumber(state.tick)}</strong></div></section>
     <section className="lab-compare" aria-label="Side-by-side universe comparison"><UniverseCompareCard label="Prime / control" tone="violet" state={state} /><div className="compare-divider"><span>Δ</span><small>branch</small></div><UniverseCompareCard label="Echo / counterfactual" tone="teal" state={otherState} /></section>
     {comparison && <ComparisonResult comparison={comparison} />}
     <div className="experiment-grid">{state.experiments.length ? state.experiments.map((experiment) => <ExperimentCard key={experiment.id} experiment={experiment} running={runningId === experiment.id} onRun={() => onRun(experiment)} />) : <EmptyState title="No experiments registered" body="The API returned no scenarios for this universe." />}</div>
-    <section className="panel experiment-history"><PanelHeader title="Run protocol" subtitle="The frontend sends POST /experiments/run with universe and experiment identifiers." /><div className="protocol-grid"><ProtocolStep index="01" title="Name the variable" text="Pick one factor to change." /><ProtocolStep index="02" title="Run the sequence" text="The backend advances its model." /><ProtocolStep index="03" title="Read the wake" text="Compare metrics, graph, and citizens." /></div></section>
+     <section className="panel experiment-history"><PanelHeader title="Durable run history" subtitle="Every completed run keeps its source and branch snapshot provenance." action={<StatusPill tone="neutral">{history.length} saved</StatusPill>} />{history.length ? <div className="run-history-list">{history.slice(0, 8).map((run) => <article className="run-history-row" key={run.runId}><div className="run-history-row__main"><StatusPill tone={run.status === 'completed' ? 'green' : run.status === 'failed' ? 'red' : 'amber'}>{run.status}</StatusPill><div><strong>{run.experimentId.replaceAll('-', ' ')}</strong><span>run {run.runId.slice(0, 10)} · {formatDateTime(run.updatedAt)}</span></div></div><div className="run-history-row__provenance"><span>Source {run.sourceSnapshot ? `#${run.sourceSnapshot.snapshotId} · tick ${run.sourceSnapshot.tick}` : 'unavailable'}</span><span>Branches {run.controlSnapshot ? `#${run.controlSnapshot.snapshotId}` : '—'} / {run.treatmentSnapshot ? `#${run.treatmentSnapshot.snapshotId}` : '—'}</span></div><a className="text-button" href={api.experimentRunExportUrl(run.runId)} target="_blank" rel="noreferrer">Export <Icon name="arrow" size={13} /></a></article>)}</div> : <EmptyState title="No durable runs yet" body="Run a catalog experiment to create a history entry with source, control, and treatment snapshot tags." />}</section>
+     <section className="panel experiment-history"><PanelHeader title="Run protocol" subtitle="The backend owns the run record and branch snapshots." /><div className="protocol-grid"><ProtocolStep index="01" title="Name the variable" text="Pick one factor to change." /><ProtocolStep index="02" title="Run the sequence" text="The backend records a tagged source and two branches." /><ProtocolStep index="03" title="Read the wake" text="Retrieve, export, and compare the durable result." /></div></section>
   </>
 }
 
@@ -310,6 +312,7 @@ export default function App() {
   const [demoRunning, setDemoRunning] = useState(false)
   const [selectedCitizen, setSelectedCitizen] = useState<SelectedCitizen>()
   const [comparison, setComparison] = useState<ExperimentComparison>()
+  const [experimentRuns, setExperimentRuns] = useState<ExperimentRun[]>([])
   const [toast, setToast] = useState<Toast>(null)
   const [error, setError] = useState<string | null>(null)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -329,9 +332,23 @@ export default function App() {
 
   const enterOfflinePreview = useCallback((message = 'Simulation API is unreachable. Showing deterministic offline preview data.') => {
     setOffline(true)
+    setExperimentRuns([])
     setStateByUniverse({ prime: buildFallbackState('prime'), echo: buildFallbackState('echo') })
     showToast({ tone: 'warning', message })
   }, [showToast])
+
+  const loadExperimentHistory = useCallback(async (universeId: UniverseId) => {
+    if (offline) {
+      setExperimentRuns([])
+      return
+    }
+    try {
+      setExperimentRuns(await api.getExperimentRuns(universeId))
+    } catch (requestError) {
+      if (isUnavailable(requestError)) enterOfflinePreview()
+      else setError(requestError instanceof Error ? requestError.message : 'Could not load experiment history.')
+    }
+  }, [enterOfflinePreview, offline])
 
   const loadUniverse = useCallback(async (universeId: UniverseId, showLoader = false) => {
     if (offline) {
@@ -381,6 +398,10 @@ export default function App() {
   // State is intentionally read as a snapshot only when entering the view.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView, activeUniverse, offline])
+
+  useEffect(() => {
+    if (activeView === 'lab' && !offline) void loadExperimentHistory(activeUniverse)
+  }, [activeView, activeUniverse, loadExperimentHistory, offline])
 
   const selectUniverse = (universeId: UniverseId) => {
     setActiveUniverse(universeId)
@@ -459,8 +480,9 @@ export default function App() {
         // The actual counterfactual is forked from the synchronized prime
         // snapshot. Control receives only the claim; treatment receives
         // delayed credible counterevidence. The branch result is not UI copy.
-        const branch = await api.runExperiment('prime', 'rumor-counterevidence')
-        setComparison(branch)
+         const branch = await api.runExperiment('prime', 'rumor-counterevidence')
+         setComparison(branch)
+         setExperimentRuns(await api.getExperimentRuns('prime'))
         const [prime, echo] = await Promise.all([api.getState('prime'), api.getState('echo')])
         setUniverseState('prime', prime)
         setUniverseState('echo', echo)
@@ -482,8 +504,9 @@ export default function App() {
         setUniverseState(activeUniverse, { ...current, experiments: current.experiments.map((item) => item.id === experiment.id ? { ...item, status: 'complete', lastRun: 'just now' } : item) })
         showToast({ tone: 'warning', message: 'Experiment marked complete in preview; no live outcome was recorded.' })
       } else {
-        const result = await api.runExperiment(activeUniverse, experiment.id)
-        setComparison(result)
+        const run = await api.createExperimentRun(activeUniverse, experiment.id)
+        if (run.result) setComparison({ ...run.result, run_id: run.runId, status: run.status })
+        setExperimentRuns((current) => [run, ...current.filter((item) => item.runId !== run.runId)])
         setUniverseState(activeUniverse, await api.getState(activeUniverse))
         showToast({ tone: 'success', message: `${experiment.name} completed.` })
       }
@@ -540,7 +563,7 @@ export default function App() {
       case 'social': return <SocialUniverseView state={state} />
       case 'citizens': return <CitizenObservatoryView state={state} selected={selectedCitizen} onSelect={(citizen) => void selectCitizen(citizen)} onNavigate={setActiveView} />
       case 'information': return <InformationEcosystemView state={state} />
-      case 'lab': return <ButterflyLabView state={state} otherState={otherState} comparison={comparison} runningId={busyAction?.startsWith('experiment-') ? busyAction.replace('experiment-', '') : undefined} onRun={(experiment) => void runExperiment(experiment)} />
+       case 'lab': return <ButterflyLabView state={state} otherState={otherState} comparison={comparison} history={experimentRuns} runningId={busyAction?.startsWith('experiment-') ? busyAction.replace('experiment-', '') : undefined} onRun={(experiment) => void runExperiment(experiment)} />
       case 'interventions': return <InterventionConsoleView state={state} submitting={busyAction === 'intervention'} onSubmit={(input) => void applyIntervention(input)} />
       case 'mind': return <AgentMindView state={state} />
     }

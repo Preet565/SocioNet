@@ -30,10 +30,14 @@ Useful endpoints:
 - `POST /simulate/tick` with `{"ticks": 1}` — advance one to 100 ticks.
 - `POST /interventions` — apply or schedule a validated intervention.
 - `POST /experiments/side-by-side` — fork the current snapshot into control and treatment branches.
+- `POST /experiment-runs` (or `/experiments/runs`) — create a durable catalog or custom experiment run.
+- `GET /experiment-runs?universe_id=prime|echo` — list durable run status and provenance.
+- `GET /experiment-runs/{run_id}` — retrieve a complete run record, including its result and tagged snapshots.
+- `GET /experiment-runs/{run_id}/export` — download the run record as JSON.
 - `GET /analytics` — calculated engagement, belief, relationship, polarization, and topic metrics.
 - `GET /traces?tick=1` — decision traces for every lifecycle phase.
 - `GET /export/json` — downloadable state JSON.
-- `POST /state/save` and `POST /state/load` — snapshot persistence.
+- `POST /state/save` and `POST /state/load` — canonical Prime snapshot persistence; experiment artifacts are filtered out of this compatibility path.
 
 The citizen decision lifecycle is:
 
@@ -50,7 +54,7 @@ cd backend
 make test
 ```
 
-The suite covers the 100-citizen seed, lifecycle transitions, beliefs, memories, relationships, invalid interventions, delayed counterevidence, reproducibility, analytics, experiments, persistence, and API/export behavior.
+The suite covers the 100-citizen seed, lifecycle transitions, beliefs, memories, relationships, invalid interventions, delayed counterevidence, reproducibility, analytics, experiments, persistence, additive SQLite migration, provenance filtering, durable run retrieval/export, and API behavior.
 
 ## Docker deploy
 
@@ -62,4 +66,4 @@ docker build -t npc-internet-backend .
 docker run --rm -p 8000:8000 -v "$PWD/data:/app/data" npc-internet-backend
 ```
 
-SQLite snapshots are written to `./data/socionet.sqlite3` by default. If SQLite cannot be opened, the repository falls back to a JSON snapshot beside the configured database path.
+SQLite snapshots and experiment runs are written to `./data/socionet.sqlite3` by default. The repository initializes or additively migrates its schema on open. If SQLite cannot be opened, the repository falls back to the original canonical JSON snapshot plus tagged snapshot/run sidecars beside the configured database path.

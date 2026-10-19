@@ -64,3 +64,52 @@ def test_browser_projection_exposes_real_citizens_graph_and_experiment_result(tm
         assert "average_belief_confidence" in result.json()["metric_deltas"]
     finally:
         app.state.service = original
+
+
+def test_experiment_runs_are_durable_provenanced_and_do_not_replace_prime(tmp_path) -> None:
+    database_path = str(tmp_path / "runs.sqlite3")
+    original = app.state.service
+    app.state.service = SimulationService(seed=91, database_path=database_path)
+    try:
+        client = TestClient(app)
+        before = client.get("/state?universe_id=prime").json()
+        created = client.post(
+            "/experiment-runs",
+            json={"universe_id": "prime", "experiment_id": "rumor-counterevidence"},
+        )
+        assert created.status_code == 200
+        run = created.json()
+        assert run["status"] == "completed"
+        assert run["source_snapshot"]["provenance"] == "experiment_source"
+        assert run["control_snapshot"]["provenance"] == "experiment_control"
+        assert run["treatment_snapshot"]["provenance"] == "experiment_treatment"
+
+        after = client.get("/state?universe_id=prime").json()
+        assert after["tick"] == before["tick"]
+        assert client.post("/state/load", params={"snapshot_id": run["treatment_snapshot_id"]}).status_code == 404
+
+        listed = client.get("/experiment-runs", params={"universe_id": "prime"})
+        assert listed.status_code == 200
+        assert listed.json()["runs"][0]["run_id"] == run["run_id"]
+        assert client.get(f"/experiment-runs/{run['run_id']}").json()["status"] == "completed"
+        exported = client.get(f"/experiment-runs/{run['run_id']}/export")
+        assert exported.status_code == 200
+        assert exported.json()["run_id"] == run["run_id"]
+
+        catalog = client.get("/experiments", params={"universe_id": "prime"}).json()["experiments"]
+        catalog_row = next(item for item in catalog if item["id"] == "rumor-counterevidence")
+        assert catalog_row["status"] == "complete"
+        assert catalog_row["last_run_id"] == run["run_id"]
+    finally:
+        app.state.service = original
+
+    # A fresh service reads the durable status and still loads the canonical
+    # Prime snapshot, proving the result is not an in-memory-only projection.
+    app.state.service = SimulationService(seed=999, database_path=database_path)
+    try:
+        client = TestClient(app)
+        catalog = client.get("/experiments", params={"universe_id": "prime"}).json()["experiments"]
+        assert next(item for item in catalog if item["id"] == "rumor-counterevidence")["status"] == "complete"
+        assert client.get("/health").json()["seed"] == 91
+    finally:
+        app.state.service = original

@@ -198,6 +198,7 @@ def frontend_state(
     state: SimulationState,
     universe_id: str,
     completed_experiments: set[str] | None = None,
+    experiment_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return a browser-friendly, calculated projection of a real state."""
 
@@ -261,8 +262,16 @@ def frontend_state(
         "experiments": [
             {
                 **experiment,
-                "status": "complete" if experiment["id"] in (completed_experiments or set()) else "ready",
-                "last_run": f"tick {state.tick}" if experiment["id"] in (completed_experiments or set()) else None,
+                "status": (
+                    (experiment_statuses or {}).get(experiment["id"], {}).get("status")
+                    or ("complete" if experiment["id"] in (completed_experiments or set()) else "ready")
+                ),
+                "last_run": (
+                    (experiment_statuses or {}).get(experiment["id"], {}).get("last_run")
+                    or (f"tick {state.tick}" if experiment["id"] in (completed_experiments or set()) else None)
+                ),
+                "last_run_id": (experiment_statuses or {}).get(experiment["id"], {}).get("run_id"),
+                "last_run_status": (experiment_statuses or {}).get(experiment["id"], {}).get("run_status"),
             }
             for experiment in EXPERIMENT_CATALOG
         ],

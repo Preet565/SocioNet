@@ -83,6 +83,8 @@ export interface Experiment {
   variables: string[]
   projectedImpact: string
   lastRun?: string
+  lastRunId?: string
+  lastRunStatus?: string
 }
 
 export interface InterventionRecord {
@@ -184,6 +186,37 @@ export interface ExperimentComparison {
   treatment_metrics: ExperimentMetricSnapshot
   metric_deltas: Record<string, number>
   earliest_divergence: Record<string, unknown> | null
+  run_id?: string
+  status?: string
+}
+
+export type ExperimentRunStatus = 'created' | 'running' | 'completed' | 'failed'
+
+export interface SnapshotProvenance {
+  snapshotId: number
+  seed: number
+  tick: number
+  createdAt?: string | null
+  provenance: string
+  universeId: UniverseId
+  experimentRunId?: string | null
+}
+
+export interface ExperimentRun {
+  runId: string
+  experimentId: string
+  universeId: UniverseId
+  status: ExperimentRunStatus
+  seed?: number
+  sourceTick?: number
+  ticks?: number
+  createdAt: string
+  updatedAt: string
+  sourceSnapshot?: SnapshotProvenance
+  controlSnapshot?: SnapshotProvenance
+  treatmentSnapshot?: SnapshotProvenance
+  result?: ExperimentComparison
+  error?: string
 }
 
 export interface SelectedCitizen extends Citizen {
