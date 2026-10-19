@@ -5,7 +5,105 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from math import sqrt
 
-from app.models import ActionKind, Metrics, SimulationState
+from app.models import (
+    ActionKind,
+    Claim,
+    ClaimMetrics,
+    ClaimStatus,
+    Content,
+    Metrics,
+    MetricSample,
+    SimulationState,
+)
+
+
+MAX_METRIC_HISTORY = 200
+MAX_CLAIM_PROVENANCE = 400
+
+
+def _claim_id_for_content(content: Content, content_by_id: dict[str, Content]) -> str | None:
+    if content.claim_id:
+        return content.claim_id
+    if content.parent_id and content.parent_id in content_by_id:
+        return content_by_id[content.parent_id].claim_id
+    return None
+
+
+def _claims_for_state(state: SimulationState) -> dict[str, Claim]:
+    """Return the registry, deriving a read-only compatibility view for old snapshots."""
+
+    if state.claims:
+        return state.claims
+    content_by_id = {content.id: content for content in state.contents}
+    derived: dict[str, Claim] = {}
+    for content in state.contents:
+        claim_id = _claim_id_for_content(content, content_by_id)
+        if claim_id is None or content.claim_truth is None:
+            continue
+        if claim_id not in derived:
+            derived[claim_id] = Claim(
+                claim_id=claim_id,
+                topic=content.topic,
+                text=content.text,
+                truth_label=content.claim_truth,
+                origin_content_id=content.id,
+                origin_author_id=content.author_id,
+                created_tick=content.created_tick,
+            )
+    return derived
+
+
+def claim_metrics(state: SimulationState) -> dict[str, ClaimMetrics]:
+    """Calculate bounded claim-specific counts from content and recorded events."""
+
+    claims = _claims_for_state(state)
+    content_by_id = {content.id: content for content in state.contents}
+    contents_by_claim: dict[str, list[Content]] = defaultdict(list)
+    for content in state.contents:
+        claim_id = _claim_id_for_content(content, content_by_id)
+        if claim_id is not None and content.claim_truth is not None:
+            contents_by_claim[claim_id].append(content)
+
+    exposure_agents: dict[str, set[str]] = defaultdict(set)
+    exposure_counts: Counter[str] = Counter()
+    for event in state.events:
+        claim_id = event.claim_id
+        if claim_id is None and event.observed_content_id:
+            observed = content_by_id.get(event.observed_content_id)
+            claim_id = _claim_id_for_content(observed, content_by_id) if observed else None
+        if claim_id is not None and event.observed_content_id:
+            exposure_counts[claim_id] += 1
+            exposure_agents[claim_id].add(event.actor_id)
+
+    calculated: dict[str, ClaimMetrics] = {}
+    for claim_id in sorted(claims):
+        claim = claims[claim_id]
+        related = contents_by_claim.get(claim_id, [])
+        related.sort(key=lambda content: (content.created_tick, content.id))
+        replies = [content for content in related if content.kind.value == "reply"]
+        fact_checks = [content for content in related if content.kind.value == "fact_check"]
+        corrections = [
+            content
+            for content in fact_checks
+            if content.claim_truth is not None and content.claim_truth != claim.truth_label
+        ]
+        reshares = [content for content in related if content.is_reshare or content.kind.value == "reply"]
+        calculated[claim_id] = ClaimMetrics(
+            claim_id=claim_id,
+            topic=claim.topic,
+            status=claim.status,
+            truth_label=claim.truth_label,
+            first_tick=min((content.created_tick for content in related), default=claim.created_tick),
+            last_tick=max((content.created_tick for content in related), default=claim.created_tick),
+            exposures=exposure_counts[claim_id],
+            unique_exposed_agents=len(exposure_agents[claim_id]),
+            reshares=len(reshares),
+            unique_resharers=len({content.author_id for content in reshares}),
+            replies=len(replies),
+            fact_checks=len(fact_checks),
+            corrections=len(corrections),
+        )
+    return calculated
 
 
 def calculate_metrics(state: SimulationState) -> Metrics:
@@ -88,6 +186,7 @@ def calculate_metrics(state: SimulationState) -> Metrics:
         influence_distribution=influence_distribution,
         time_until_claim_stops_spreading=time_until_claim_stops_spreading,
         topic_metrics=dict(sorted(topics.items())),
+        claim_metrics=claim_metrics(state),
     )
 
 
@@ -119,3 +218,13 @@ def metric_deltas(control: Metrics, treatment: Metrics) -> dict[str, float]:
 
 def _average(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def record_metric_sample(state: SimulationState) -> MetricSample:
+    """Record one replace-on-tick sample, retaining only the bounded recent window."""
+
+    sample = MetricSample(tick=state.tick, metrics=calculate_metrics(state))
+    history = [item for item in state.metric_history if item.tick != state.tick]
+    history.append(sample)
+    state.metric_history = sorted(history, key=lambda item: item.tick)[-MAX_METRIC_HISTORY:]
+    return sample

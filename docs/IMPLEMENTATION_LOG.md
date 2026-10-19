@@ -32,3 +32,36 @@ The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it
 - Runs execute synchronously in the API process; background queues and cancellation are not part of Phase 1.
 - The active Echo universe remains in memory across backend restart; its experiment source and branch artifacts are durable and explicitly tagged.
 - Experiment records currently use JSON payloads around the existing full-state result rather than normalized event tables.
+
+## Phase 2 — metric history and claim lifecycle
+
+### Implemented
+
+- Added additive claim fields to state/content/events, with deterministic `claim-{origin-content-id}` IDs that remain shared across control/treatment forks.
+- Added claim origin/intervention provenance, bounded lineage records, and lifecycle transitions for active, disputed, confirmed, and corrected claims.
+- Added one metric sample at tick 0 and after each completed tick, retaining at most 200 samples per state or branch.
+- Added SQLite `metric_samples` and `claim_metric_samples` tables with schema version 3, plus JSON sidecar support and old-snapshot hydration.
+- Added claim-specific exposure, reshare, reply, fact-check, and correction metrics to current and historical analytics.
+- Added filtered `/analytics/history`, `/analytics/claims`, `/analytics/claims/{claim_id}`, and durable experiment history endpoints while preserving the Phase 1 API responses.
+- Added a real-data Butterfly Lab SVG comparison chart with selectable historical metrics and accessible per-tick points.
+- Documented metric definitions, bounded retention, migration behavior, and the boundary with multi-seed and later causal-analysis phases.
+
+### Verification
+
+Commands run:
+
+```text
+python3 -m pytest tests/test_phase2.py tests/test_persistence.py tests/test_api.py  # 14 passed
+make test                                                                        # 26 backend tests passed; frontend typecheck/build passed
+cd frontend && npm run typecheck                                                  # passed
+cd frontend && npm run build                                                      # passed
+git diff --check                                                                  # passed
+```
+
+The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it does not fail the suite. The backend tests include additive migration/old snapshots, deterministic history, claim lifecycle/provenance, filtered history/claims APIs, and experiment history after service restart.
+
+### Known limitations
+
+- Only the most recent 200 samples are retained per state/branch; an old snapshot can be hydrated but cannot recover history that was never persisted.
+- Exposure is an action-log observation count, not passive audience reach. Reshares intentionally overlap claim-bearing replies because the current domain has no separate reshare action.
+- A run remains one deterministic control/treatment pair. Multi-seed batches, statistical summaries, causal ancestry, and cross-run aggregation remain later phases.

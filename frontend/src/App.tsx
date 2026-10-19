@@ -6,6 +6,7 @@ import type {
   Citizen,
   Experiment,
   ExperimentComparison,
+  ExperimentHistory,
   ExperimentRun,
   InterventionRecord,
   NetworkNode,
@@ -217,30 +218,32 @@ function CitizenProfile({ citizen }: { citizen: SelectedCitizen }) {
 
 function InformationEcosystemView({ state }: { state: UniverseState }) {
   const sortedSources = [...state.sources].sort((a, b) => b.velocity - a.velocity)
+  const claimMetrics = state.metricsDetail?.claim_metrics || {}
   return <>
     <SectionHeader eyebrow="Signal layer / narratives" title="Information Ecosystem" description="See where signals begin, how quickly they move, and how much context they carry." action={<div className="signal-summary"><span className="summary-dot rising" />{state.sources.filter((source) => source.signal === 'rising').length} rising signals</div>} />
     <div className="information-grid"><section className="panel source-panel"><PanelHeader title="Source velocity" subtitle="Sorted by current spread rate" />{sortedSources.length ? <div className="source-list">{sortedSources.map((source) => <div className="source-row" key={source.id}><div className="source-row__main"><div className={`source-glyph ${source.signal}`}><Icon name={source.type.toLowerCase().includes('media') ? 'book' : 'layers'} size={16} /></div><div><strong>{source.name}</strong><span>{source.type}</span></div></div><div className="source-meter"><div><span>Velocity</span><strong>{formatPercent(source.velocity)}</strong></div><ProgressBar value={source.velocity} tone={source.signal === 'rising' ? 'pink' : source.signal === 'fading' ? 'amber' : 'violet'} /></div><div className="source-facts"><span>Reach <b>{formatPercent(source.reach)}</b></span><span>Credibility <b>{formatPercent(source.credibility)}</b></span><StatusPill tone={source.signal === 'rising' ? 'green' : source.signal === 'fading' ? 'amber' : 'neutral'}>{source.signal}</StatusPill></div></div>)}</div> : <EmptyState title="No information sources" body="The current state has not returned any channels." />}</section><aside className="panel narrative-panel"><PanelHeader title="Signal hygiene" subtitle="Three useful questions for every cascade" /><div className="hygiene-list"><HygieneRow index="01" title="How fast?" text="Velocity shows how quickly the signal is moving between nodes." /><HygieneRow index="02" title="How far?" text="Reach estimates the breadth of the signal’s current audience." /><HygieneRow index="03" title="How grounded?" text="Credibility measures the trust carried by the source, not the truth of a claim." /></div><div className="note-card"><Icon name="spark" size={16} /><span>Context is an intervention. A slower signal can still be a stronger one.</span></div></aside></div>
     <section className="panel ecosystem-footer"><div><span className="eyebrow">Current frame</span><h3>Information is a landscape, not a stream.</h3></div><div className="footer-stat"><strong>{formatPercent(state.metrics.informationEntropy)}</strong><span>information entropy</span></div><div className="footer-stat"><strong>{formatPercent(state.metrics.trustIndex)}</strong><span>trust index</span></div></section>
-    <section className="panel feed-panel"><PanelHeader title="Information feed" subtitle="Actual citizen content from the current simulation tick" />{state.posts?.length ? <div className="feed-list">{state.posts.slice(0, 12).map((post) => <FeedItem key={post.id} post={post} />)}</div> : <EmptyState title="No content has been published" body="Advance the simulation to let citizens observe, post, reply, or fact-check." />}</section>
+     <section className="panel feed-panel"><PanelHeader title="Information feed" subtitle="Actual citizen content from the current simulation tick" />{state.posts?.length ? <div className="feed-list">{state.posts.slice(0, 12).map((post) => <FeedItem key={post.id} post={post} claimMetric={post.claim_id ? claimMetrics[post.claim_id] : undefined} />)}</div> : <EmptyState title="No content has been published" body="Advance the simulation to let citizens observe, post, reply, or fact-check." />}</section>
   </>
 }
 
-function FeedItem({ post }: { post: NonNullable<UniverseState['posts']>[number] }) {
+function FeedItem({ post, claimMetric }: { post: NonNullable<UniverseState['posts']>[number]; claimMetric?: NonNullable<UniverseState['metricsDetail']>['claim_metrics'][string] }) {
   const evidence = post.is_counterevidence ? 'counterevidence' : post.fact_checked ? 'fact-checked' : post.claim_truth === true ? 'verified claim' : post.claim_truth === false ? 'unverified claim' : 'opinion'
   const evidenceTone = post.is_counterevidence || post.fact_checked ? 'green' : post.claim_truth === false ? 'amber' : 'neutral'
-  return <article className="feed-item"><div className="feed-item__top"><div><strong>{post.author}</strong><span> · {post.kind} · tick {post.created_tick}</span></div><StatusPill tone={evidenceTone}>{evidence}</StatusPill></div><p>{post.text}</p><div className="feed-item__meta"><span>topic: <b>{post.topic}</b></span><span>credibility <b>{formatPercent(post.credibility)}</b></span><span>exposures <b>{formatNumber(post.exposureCount)}</b></span><span>{post.parent_id ? 'reply chain' : 'origin signal'}</span></div></article>
+  return <article className="feed-item"><div className="feed-item__top"><div><strong>{post.author}</strong><span> · {post.kind} · tick {post.created_tick}</span></div><StatusPill tone={evidenceTone}>{evidence}</StatusPill></div><p>{post.text}</p><div className="feed-item__meta"><span>topic: <b>{post.topic}</b></span><span>credibility <b>{formatPercent(post.credibility)}</b></span><span>exposures <b>{formatNumber(claimMetric?.exposures ?? post.exposureCount)}</b></span><span>{post.parent_id ? 'reply chain' : 'origin signal'}</span>{claimMetric && <><span>claim <b>{claimMetric.status}</b></span><span>reshares <b>{formatNumber(claimMetric.reshares)}</b></span><span>corrections <b>{formatNumber(claimMetric.corrections)}</b></span></>}</div></article>
 }
 
 function HygieneRow({ index, title, text }: { index: string; title: string; text: string }) {
   return <div className="hygiene-row"><span>{index}</span><div><strong>{title}</strong><p>{text}</p></div></div>
 }
 
-function ButterflyLabView({ state, otherState, comparison, history, runningId, onRun }: { state: UniverseState; otherState: UniverseState; comparison?: ExperimentComparison; history: ExperimentRun[]; runningId?: string; onRun: (experiment: Experiment) => void }) {
+function ButterflyLabView({ state, otherState, comparison, history, experimentHistory, runningId, onRun }: { state: UniverseState; otherState: UniverseState; comparison?: ExperimentComparison; history: ExperimentRun[]; experimentHistory?: ExperimentHistory; runningId?: string; onRun: (experiment: Experiment) => void }) {
   return <>
     <SectionHeader eyebrow="Counterfactuals / controlled change" title="Butterfly Lab" description="Run the same question against the current universe and record what moves." action={<StatusPill tone="violet"><Icon name="flask" size={13} /> reproducible experiments</StatusPill>} />
     <section className="panel lab-intro"><div className="lab-intro__mark"><Icon name="spark" size={23} /></div><div><span className="eyebrow">Method note</span><h3>A good experiment changes one thing you can name.</h3><p>Every run is attached to a universe, a tick, and an explicit set of variables. Use the two-universe demo to establish a shared starting frame before comparing outcomes.</p></div><div className="lab-intro__tick"><span>Selected tick</span><strong>{formatNumber(state.tick)}</strong></div></section>
     <section className="lab-compare" aria-label="Side-by-side universe comparison"><UniverseCompareCard label="Prime / control" tone="violet" state={state} /><div className="compare-divider"><span>Δ</span><small>branch</small></div><UniverseCompareCard label="Echo / counterfactual" tone="teal" state={otherState} /></section>
-    {comparison && <ComparisonResult comparison={comparison} />}
+     {comparison && <ComparisonResult comparison={comparison} />}
+     {experimentHistory && <HistoryComparisonChart history={experimentHistory} />}
     <div className="experiment-grid">{state.experiments.length ? state.experiments.map((experiment) => <ExperimentCard key={experiment.id} experiment={experiment} running={runningId === experiment.id} onRun={() => onRun(experiment)} />) : <EmptyState title="No experiments registered" body="The API returned no scenarios for this universe." />}</div>
      <section className="panel experiment-history"><PanelHeader title="Durable run history" subtitle="Every completed run keeps its source and branch snapshot provenance." action={<StatusPill tone="neutral">{history.length} saved</StatusPill>} />{history.length ? <div className="run-history-list">{history.slice(0, 8).map((run) => <article className="run-history-row" key={run.runId}><div className="run-history-row__main"><StatusPill tone={run.status === 'completed' ? 'green' : run.status === 'failed' ? 'red' : 'amber'}>{run.status}</StatusPill><div><strong>{run.experimentId.replaceAll('-', ' ')}</strong><span>run {run.runId.slice(0, 10)} · {formatDateTime(run.updatedAt)}</span></div></div><div className="run-history-row__provenance"><span>Source {run.sourceSnapshot ? `#${run.sourceSnapshot.snapshotId} · tick ${run.sourceSnapshot.tick}` : 'unavailable'}</span><span>Branches {run.controlSnapshot ? `#${run.controlSnapshot.snapshotId}` : '—'} / {run.treatmentSnapshot ? `#${run.treatmentSnapshot.snapshotId}` : '—'}</span></div><a className="text-button" href={api.experimentRunExportUrl(run.runId)} target="_blank" rel="noreferrer">Export <Icon name="arrow" size={13} /></a></article>)}</div> : <EmptyState title="No durable runs yet" body="Run a catalog experiment to create a history entry with source, control, and treatment snapshot tags." />}</section>
      <section className="panel experiment-history"><PanelHeader title="Run protocol" subtitle="The backend owns the run record and branch snapshots." /><div className="protocol-grid"><ProtocolStep index="01" title="Name the variable" text="Pick one factor to change." /><ProtocolStep index="02" title="Run the sequence" text="The backend records a tagged source and two branches." /><ProtocolStep index="03" title="Read the wake" text="Retrieve, export, and compare the durable result." /></div></section>
@@ -255,6 +258,54 @@ function ComparisonResult({ comparison }: { comparison: ExperimentComparison }) 
   const delta = (name: string) => comparison.metric_deltas[name] ?? 0
   const signed = (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(3)}`
   return <section className="panel comparison-result"><div><span className="eyebrow">Measured branch result</span><h3>{comparison.experiment_id.replaceAll('-', ' ')}</h3><p>Same seed <b>{comparison.seed}</b> · {comparison.ticks} ticks · calculated from recorded events. No outcome was prewritten.</p></div><div className="comparison-metrics"><div><span>Belief confidence Δ</span><strong>{signed(delta('average_belief_confidence'))}</strong></div><div><span>Trust Δ</span><strong>{signed(delta('average_relationship_trust'))}</strong></div><div><span>Fact-checks Δ</span><strong>{signed(delta('fact_checks'))}</strong></div><div><span>Polarization Δ</span><strong>{signed(delta('polarization'))}</strong></div></div><div className="comparison-footnote"><Icon name="activity" size={14} /> {comparison.earliest_divergence ? `Earliest divergence at recorded event ${String(comparison.earliest_divergence.event_index ?? '—')}.` : 'No divergence recorded in this run.'}</div></section>
+}
+
+type HistoryMetric = 'total_contents' | 'engagement_rate' | 'exposure_rate' | 'reshare_rate' | 'correction_reach' | 'polarization'
+
+const historyMetricOptions: Array<{ key: HistoryMetric; label: string; format: (value: number) => string }> = [
+  { key: 'total_contents', label: 'Total content', format: (value) => formatNumber(value) },
+  { key: 'engagement_rate', label: 'Engagement rate', format: formatPercent },
+  { key: 'exposure_rate', label: 'Exposure rate', format: formatPercent },
+  { key: 'reshare_rate', label: 'Reshare rate', format: formatPercent },
+  { key: 'correction_reach', label: 'Correction reach', format: formatPercent },
+  { key: 'polarization', label: 'Polarization', format: formatPercent },
+]
+
+function HistoryComparisonChart({ history }: { history: ExperimentHistory }) {
+  const [metric, setMetric] = useState<HistoryMetric>('exposure_rate')
+  const [hoveredTick, setHoveredTick] = useState<number>()
+  const control = history.branches.control?.samples || []
+  const treatment = history.branches.treatment?.samples || []
+  const selected = historyMetricOptions.find((item) => item.key === metric) || historyMetricOptions[0]
+  const ticks = Array.from(new Set([...control, ...treatment].map((sample) => sample.tick))).sort((left, right) => left - right)
+  const values = [...control, ...treatment].map((sample) => Number(sample.metrics[metric])).filter((value) => Number.isFinite(value))
+  const minimum = Math.min(...values, 0)
+  const maximum = Math.max(...values, 1)
+  const width = 760
+  const height = 260
+  const padding = { top: 22, right: 18, bottom: 32, left: 43 }
+  const x = (tick: number) => padding.left + ((tick - (ticks[0] || 0)) / Math.max(1, (ticks[ticks.length - 1] || 1) - (ticks[0] || 0))) * (width - padding.left - padding.right)
+  const y = (value: number) => height - padding.bottom - ((value - minimum) / Math.max(0.0001, maximum - minimum)) * (height - padding.top - padding.bottom)
+  const line = (samples: typeof control) => samples.map((sample) => `${x(sample.tick)},${y(Number(sample.metrics[metric]))}`).join(' ')
+  const hoveredControl = control.find((sample) => sample.tick === hoveredTick)
+  const hoveredTreatment = treatment.find((sample) => sample.tick === hoveredTick)
+
+  if (!control.length && !treatment.length) return <EmptyState title="No metric history returned" body="This run has no persisted per-tick samples to chart." />
+
+  return <section className="panel history-chart-panel">
+    <PanelHeader title="Historical branch comparison" subtitle="Persisted per-tick measurements from the selected run" action={<label className="chart-select"><span>Metric</span><select value={metric} onChange={(event) => setMetric(event.target.value as HistoryMetric)}>{historyMetricOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}</select></label>} />
+    <div className="history-chart-wrap">
+      <svg className="history-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${selected.label} comparison over ${ticks.length} recorded ticks`}>
+        <g className="history-chart__grid"><line x1={padding.left} x2={width - padding.right} y1={y(minimum)} y2={y(minimum)} /><line x1={padding.left} x2={width - padding.right} y1={y((minimum + maximum) / 2)} y2={y((minimum + maximum) / 2)} /><line x1={padding.left} x2={width - padding.right} y1={y(maximum)} y2={y(maximum)} /></g>
+        <polyline className="history-chart__line control" points={line(control)} />
+        <polyline className="history-chart__line treatment" points={line(treatment)} />
+        <g className="history-chart__points">{control.map((sample) => <circle key={`control-${sample.tick}`} className="control" cx={x(sample.tick)} cy={y(Number(sample.metrics[metric]))} r="4" onMouseEnter={() => setHoveredTick(sample.tick)} onFocus={() => setHoveredTick(sample.tick)} tabIndex={0} aria-label={`Control tick ${sample.tick}: ${selected.format(Number(sample.metrics[metric]))}`} />)}{treatment.map((sample) => <circle key={`treatment-${sample.tick}`} className="treatment" cx={x(sample.tick)} cy={y(Number(sample.metrics[metric]))} r="4" onMouseEnter={() => setHoveredTick(sample.tick)} onFocus={() => setHoveredTick(sample.tick)} tabIndex={0} aria-label={`Treatment tick ${sample.tick}: ${selected.format(Number(sample.metrics[metric]))}`} />)}</g>
+        {ticks.map((tick) => <text key={tick} x={x(tick)} y={height - 10} textAnchor="middle">T{tick}</text>)}
+      </svg>
+      <div className="history-chart__legend"><span><i className="control" />Control</span><span><i className="treatment" />Treatment</span>{hoveredTick !== undefined && <strong>Tick {hoveredTick} · control {hoveredControl ? selected.format(Number(hoveredControl.metrics[metric])) : '—'} · treatment {hoveredTreatment ? selected.format(Number(hoveredTreatment.metrics[metric])) : '—'}</strong>}</div>
+      <p className="history-chart__note">{selected.label} · {ticks.length} bounded samples · values are recalculated from the recorded branch event histories.</p>
+    </div>
+  </section>
 }
 
 function ExperimentCard({ experiment, running, onRun }: { experiment: Experiment; running: boolean; onRun: () => void }) {
@@ -312,6 +363,7 @@ export default function App() {
   const [demoRunning, setDemoRunning] = useState(false)
   const [selectedCitizen, setSelectedCitizen] = useState<SelectedCitizen>()
   const [comparison, setComparison] = useState<ExperimentComparison>()
+  const [experimentHistory, setExperimentHistory] = useState<ExperimentHistory>()
   const [experimentRuns, setExperimentRuns] = useState<ExperimentRun[]>([])
   const [toast, setToast] = useState<Toast>(null)
   const [error, setError] = useState<string | null>(null)
@@ -333,6 +385,7 @@ export default function App() {
   const enterOfflinePreview = useCallback((message = 'Simulation API is unreachable. Showing deterministic offline preview data.') => {
     setOffline(true)
     setExperimentRuns([])
+    setExperimentHistory(undefined)
     setStateByUniverse({ prime: buildFallbackState('prime'), echo: buildFallbackState('echo') })
     showToast({ tone: 'warning', message })
   }, [showToast])
@@ -481,8 +534,9 @@ export default function App() {
         // snapshot. Control receives only the claim; treatment receives
         // delayed credible counterevidence. The branch result is not UI copy.
          const branch = await api.runExperiment('prime', 'rumor-counterevidence')
-         setComparison(branch)
-         setExperimentRuns(await api.getExperimentRuns('prime'))
+          setComparison(branch)
+          if (branch.run_id) setExperimentHistory(await api.getExperimentHistory(branch.run_id))
+          setExperimentRuns(await api.getExperimentRuns('prime'))
         const [prime, echo] = await Promise.all([api.getState('prime'), api.getState('echo')])
         setUniverseState('prime', prime)
         setUniverseState('echo', echo)
@@ -506,6 +560,7 @@ export default function App() {
       } else {
         const run = await api.createExperimentRun(activeUniverse, experiment.id)
         if (run.result) setComparison({ ...run.result, run_id: run.runId, status: run.status })
+        setExperimentHistory(await api.getExperimentHistory(run.runId))
         setExperimentRuns((current) => [run, ...current.filter((item) => item.runId !== run.runId)])
         setUniverseState(activeUniverse, await api.getState(activeUniverse))
         showToast({ tone: 'success', message: `${experiment.name} completed.` })
@@ -563,7 +618,7 @@ export default function App() {
       case 'social': return <SocialUniverseView state={state} />
       case 'citizens': return <CitizenObservatoryView state={state} selected={selectedCitizen} onSelect={(citizen) => void selectCitizen(citizen)} onNavigate={setActiveView} />
       case 'information': return <InformationEcosystemView state={state} />
-       case 'lab': return <ButterflyLabView state={state} otherState={otherState} comparison={comparison} history={experimentRuns} runningId={busyAction?.startsWith('experiment-') ? busyAction.replace('experiment-', '') : undefined} onRun={(experiment) => void runExperiment(experiment)} />
+       case 'lab': return <ButterflyLabView state={state} otherState={otherState} comparison={comparison} history={experimentRuns} experimentHistory={experimentHistory} runningId={busyAction?.startsWith('experiment-') ? busyAction.replace('experiment-', '') : undefined} onRun={(experiment) => void runExperiment(experiment)} />
       case 'interventions': return <InterventionConsoleView state={state} submitting={busyAction === 'intervention'} onSubmit={(input) => void applyIntervention(input)} />
       case 'mind': return <AgentMindView state={state} />
     }

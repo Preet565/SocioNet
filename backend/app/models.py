@@ -42,6 +42,13 @@ class InterventionKind(str, Enum):
     FACT_CHECK = "fact_check"
 
 
+class ClaimStatus(str, Enum):
+    ACTIVE = "active"
+    DISPUTED = "disputed"
+    CONFIRMED = "confirmed"
+    CORRECTED = "corrected"
+
+
 class Agent(BaseModel):
     """A fictional citizen and their mutable simulation state."""
 
@@ -114,6 +121,45 @@ class Content(BaseModel):
     likes: int = Field(default=0, ge=0)
     fact_checked: bool = False
     is_counterevidence: bool = False
+    claim_id: str | None = None
+    is_reshare: bool = False
+    provenance: str = "organic"
+    intervention_id: str | None = None
+
+
+class ClaimProvenanceRecord(BaseModel):
+    content_id: str
+    kind: ContentKind
+    actor_id: str
+    tick: int = Field(ge=0)
+    parent_content_id: str | None = None
+    source: str = "organic"
+    intervention_id: str | None = None
+
+
+class ClaimLifecycleEvent(BaseModel):
+    status: ClaimStatus
+    tick: int = Field(ge=0)
+    content_id: str | None = None
+    actor_id: str | None = None
+    reason: str = ""
+
+
+class Claim(BaseModel):
+    """A stable claim identity shared by its origin, replies, and evidence."""
+
+    claim_id: str
+    topic: str
+    text: str
+    truth_label: bool
+    origin_content_id: str
+    origin_author_id: str
+    created_tick: int = Field(ge=0)
+    origin_source: str = "organic"
+    origin_intervention_id: str | None = None
+    status: ClaimStatus = ClaimStatus.ACTIVE
+    provenance: list[ClaimProvenanceRecord] = Field(default_factory=list)
+    lifecycle: list[ClaimLifecycleEvent] = Field(default_factory=list)
 
 
 class ActionEvent(BaseModel):
@@ -123,6 +169,8 @@ class ActionEvent(BaseModel):
     action: ActionKind
     target_id: str | None = None
     content_id: str | None = None
+    observed_content_id: str | None = None
+    claim_id: str | None = None
     topic: str | None = None
     details: str = ""
 
@@ -215,11 +263,13 @@ class SimulationState(BaseModel):
     agents: dict[str, Agent]
     communities: dict[str, Community]
     contents: list[Content] = Field(default_factory=list)
+    claims: dict[str, Claim] = Field(default_factory=dict)
     traces: list[DecisionTrace] = Field(default_factory=list)
     events: list[ActionEvent] = Field(default_factory=list)
     scheduled_interventions: list[ScheduledIntervention] = Field(default_factory=list)
     applied_interventions: list[str] = Field(default_factory=list)
     intervention_history: list[InterventionRecord] = Field(default_factory=list)
+    metric_history: list["MetricSample"] = Field(default_factory=list)
     config: SimulationConfig = Field(default_factory=SimulationConfig)
 
 
@@ -258,6 +308,28 @@ class Metrics(BaseModel):
     influence_distribution: dict[str, float] = Field(default_factory=dict)
     time_until_claim_stops_spreading: int = 0
     topic_metrics: dict[str, dict[str, float | int]] = Field(default_factory=dict)
+    claim_metrics: dict[str, "ClaimMetrics"] = Field(default_factory=dict)
+
+
+class ClaimMetrics(BaseModel):
+    claim_id: str
+    topic: str
+    status: ClaimStatus
+    truth_label: bool
+    first_tick: int
+    last_tick: int
+    exposures: int = 0
+    unique_exposed_agents: int = 0
+    reshares: int = 0
+    unique_resharers: int = 0
+    replies: int = 0
+    fact_checks: int = 0
+    corrections: int = 0
+
+
+class MetricSample(BaseModel):
+    tick: int = Field(ge=0)
+    metrics: Metrics
 
 
 class ExperimentResult(BaseModel):
@@ -272,3 +344,6 @@ class ExperimentResult(BaseModel):
 
 Agent.model_rebuild()
 ScheduledIntervention.model_rebuild()
+SimulationState.model_rebuild()
+Metrics.model_rebuild()
+MetricSample.model_rebuild()

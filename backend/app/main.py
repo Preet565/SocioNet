@@ -35,7 +35,7 @@ from app.persistence import (
     export_json,
 )
 from app.presentation import EXPERIMENT_CATALOG, citizen_view, frontend_state
-from app.simulation import Simulation
+from app.simulation import Simulation, ensure_claim_registry
 
 
 class ResetRequest(BaseModel):
@@ -86,7 +86,14 @@ class SimulationService:
         self.experiment_runs: dict[tuple[str, str], Any] = {}
         self.lock = RLock()
         if persisted is None:
-            self.store.save(self.universes["prime"].state)
+            self._save_canonical(self.universes["prime"].state, "prime")
+        else:
+            self.store.save_metric_history(
+                self.universes["prime"].state.metric_history,
+                scope_id="canonical:prime",
+                branch="canonical",
+                universe_id="prime",
+            )
 
     @property
     def state(self) -> SimulationState:
@@ -101,7 +108,7 @@ class SimulationService:
     def tick(self, ticks: int) -> SimulationState:
         with self.lock:
             self.simulation.run(ticks)
-            self.store.save(self.state)
+            self._save_canonical(self.state, "prime")
             return self.state
 
     def tick_universe(self, universe_id: str, ticks: int) -> SimulationState:
@@ -109,14 +116,14 @@ class SimulationService:
             simulation = self.universe(universe_id)
             simulation.run(ticks)
             if universe_id == "prime":
-                self.store.save(simulation.state)
+                self._save_canonical(simulation.state, universe_id)
             return simulation.state
 
     def reset(self, seed: int) -> SimulationState:
         with self.lock:
             self.simulation = Simulation(seed=seed)
             self.universes["prime"] = self.simulation
-            self.store.save(self.state)
+            self._save_canonical(self.state, "prime")
             return self.state
 
     def reset_universe(self, universe_id: str, seed: int | None = None) -> SimulationState:
@@ -126,13 +133,13 @@ class SimulationService:
             self.universes[universe_id] = next_simulation
             if universe_id == "prime":
                 self.simulation = next_simulation
-                self.store.save(next_simulation.state)
+                self._save_canonical(next_simulation.state, universe_id)
             return next_simulation.state
 
     def apply(self, intervention: Intervention) -> SimulationState:
         with self.lock:
             apply_intervention(self.state, intervention)
-            self.store.save(self.state)
+            self._save_canonical(self.state, "prime")
             return self.state
 
     def apply_universe(self, universe_id: str, intervention: Intervention) -> SimulationState:
@@ -140,14 +147,30 @@ class SimulationService:
             simulation = self.universe(universe_id)
             apply_intervention(simulation.state, intervention)
             if universe_id == "prime":
-                self.store.save(simulation.state)
+                self._save_canonical(simulation.state, universe_id)
             return simulation.state
 
     def load(self, snapshot_id: int | None = None) -> SimulationState:
         with self.lock:
             self.simulation = Simulation(state=self.store.load(snapshot_id))
             self.universes["prime"] = self.simulation
+            self.store.save_metric_history(
+                self.simulation.state.metric_history,
+                scope_id="canonical:prime",
+                branch="canonical",
+                universe_id="prime",
+            )
             return self.state
+
+    def _save_canonical(self, state: SimulationState, universe_id: str) -> int:
+        snapshot_id = self.store.save(state, universe_id=universe_id)
+        self.store.save_metric_history(
+            state.metric_history,
+            scope_id=f"canonical:{universe_id}",
+            branch="canonical",
+            universe_id=universe_id,
+        )
+        return snapshot_id
 
     def catalog_statuses(self, universe_id: str) -> dict[str, dict[str, Any]]:
         """Return latest durable run status for each catalog experiment."""
@@ -231,6 +254,20 @@ class SimulationService:
                     provenance=EXPERIMENT_TREATMENT_PROVENANCE,
                     universe_id=universe_id,
                     experiment_run_id=run_id,
+                )
+                self.store.save_metric_history(
+                    result.control.metric_history,
+                    scope_id=run_id,
+                    branch="control",
+                    universe_id=universe_id,
+                    run_id=run_id,
+                )
+                self.store.save_metric_history(
+                    result.treatment.metric_history,
+                    scope_id=run_id,
+                    branch="treatment",
+                    universe_id=universe_id,
+                    run_id=run_id,
                 )
                 legacy_result = experiment_result_payload(result, experiment_id, universe_id)
                 updated_at = datetime.now(timezone.utc).isoformat()
@@ -400,6 +437,180 @@ def analytics(request: Request) -> Metrics:
     return calculate_metrics(get_service(request).state)
 
 
+def _bounded_limit(value: int) -> int:
+    return min(200, max(1, value))
+
+
+def _history_samples(
+    service: SimulationService,
+    *,
+    universe_id: str,
+    run_id: str | None,
+    branch: str,
+    from_tick: int | None,
+    to_tick: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    scope_id = run_id or f"canonical:{universe_id}"
+    return service.store.list_metric_history(
+        scope_id=scope_id,
+        branch=branch,
+        from_tick=from_tick,
+        to_tick=to_tick,
+        limit=_bounded_limit(limit),
+    )
+
+
+@app.get("/analytics/history")
+def analytics_history(
+    request: Request,
+    universe_id: Literal["prime", "echo"] = "prime",
+    run_id: str | None = Query(default=None, min_length=1, max_length=100),
+    branch: Literal["canonical", "control", "treatment"] = "canonical",
+    from_tick: int | None = Query(default=None, ge=0),
+    to_tick: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+) -> dict[str, Any]:
+    service = get_service(request)
+    if run_id and branch == "canonical":
+        branch = "control"
+    if run_id:
+        run = service.store.get_experiment_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+        if run.get("universe_id") != universe_id:
+            raise HTTPException(status_code=404, detail=f"experiment run is not in universe_id: {universe_id}")
+    samples = _history_samples(
+        service,
+        universe_id=universe_id,
+        run_id=run_id,
+        branch=branch,
+        from_tick=from_tick,
+        to_tick=to_tick,
+        limit=limit,
+    )
+    if not run_id and not samples:
+        state = service.universe(universe_id).state
+        samples = [sample.model_dump(mode="json") for sample in state.metric_history]
+        samples = [
+            sample
+            for sample in samples
+            if (from_tick is None or sample["tick"] >= from_tick)
+            and (to_tick is None or sample["tick"] <= to_tick)
+        ][:_bounded_limit(limit)]
+    return {
+        "run_id": run_id,
+        "universe_id": universe_id,
+        "branch": branch,
+        "samples": samples,
+        "sample_count": len(samples),
+        "metric_definitions": metric_definitions(),
+    }
+
+
+def _run_branch_state(run: dict[str, Any], branch: str) -> SimulationState | None:
+    result = run.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get(branch), dict):
+        return None
+    try:
+        state = SimulationState.model_validate(result[branch])
+        ensure_claim_registry(state)
+        return state
+    except ValidationError:
+        return None
+
+
+def _claim_rows(state: SimulationState, claim_id: str | None = None, status: str | None = None, topic: str | None = None) -> list[dict[str, Any]]:
+    metrics = calculate_metrics(state).claim_metrics
+    rows: list[dict[str, Any]] = []
+    for current_id in sorted(state.claims):
+        claim = state.claims[current_id]
+        if claim_id and current_id != claim_id:
+            continue
+        if status and claim.status.value != status:
+            continue
+        if topic and claim.topic != topic:
+            continue
+        rows.append({**claim.model_dump(mode="json"), "metrics": metrics.get(current_id).model_dump(mode="json") if current_id in metrics else None})
+    return rows
+
+
+@app.get("/analytics/claims")
+def analytics_claims(
+    request: Request,
+    universe_id: Literal["prime", "echo"] = "prime",
+    run_id: str | None = Query(default=None, min_length=1, max_length=100),
+    branch: Literal["control", "treatment"] = "control",
+    claim_id: str | None = Query(default=None, min_length=1, max_length=100),
+    status: str | None = Query(default=None, min_length=1, max_length=30),
+    topic: str | None = Query(default=None, min_length=1, max_length=80),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> dict[str, Any]:
+    service = get_service(request)
+    if run_id:
+        run = service.store.get_experiment_run(run_id)
+        if run is None or run.get("universe_id") != universe_id:
+            raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+        state = _run_branch_state(run, branch)
+        if state is None:
+            raise HTTPException(status_code=404, detail=f"branch history unavailable: {branch}")
+    else:
+        state = service.universe(universe_id).state
+    rows = _claim_rows(state, claim_id=claim_id, status=status, topic=topic)[:_bounded_limit(limit)]
+    return {"run_id": run_id, "universe_id": universe_id, "branch": branch if run_id else "canonical", "claims": rows}
+
+
+@app.get("/analytics/claims/{claim_id}")
+def analytics_claim(
+    claim_id: str,
+    request: Request,
+    universe_id: Literal["prime", "echo"] = "prime",
+    run_id: str | None = Query(default=None, min_length=1, max_length=100),
+    branch: Literal["control", "treatment"] = "control",
+) -> dict[str, Any]:
+    service = get_service(request)
+    if run_id:
+        run = service.store.get_experiment_run(run_id)
+        if run is None or run.get("universe_id") != universe_id:
+            raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+        state = _run_branch_state(run, branch)
+        if state is None:
+            raise HTTPException(status_code=404, detail=f"branch history unavailable: {branch}")
+    else:
+        state = service.universe(universe_id).state
+    rows = _claim_rows(state, claim_id=claim_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"unknown claim_id: {claim_id}")
+    effective_branch = branch if run_id else "canonical"
+    samples = _history_samples(
+        service,
+        universe_id=universe_id,
+        run_id=run_id,
+        branch=effective_branch,
+        from_tick=None,
+        to_tick=None,
+        limit=200,
+    )
+    claim_history = [
+        {"tick": sample.get("tick"), "metrics": sample.get("metrics", {}).get("claim_metrics", {}).get(claim_id)}
+        for sample in samples
+        if isinstance(sample.get("metrics"), dict)
+        and claim_id in sample["metrics"].get("claim_metrics", {})
+    ]
+    return {**rows[0], "run_id": run_id, "universe_id": universe_id, "branch": effective_branch, "history": claim_history}
+
+
+def metric_definitions() -> dict[str, str]:
+    return {
+        "exposures": "Recorded agent actions that observed content carrying the claim.",
+        "reshares": "Claim-bearing replies or explicitly marked claim-bearing repeats.",
+        "replies": "Claim-bearing content whose kind is reply.",
+        "fact_checks": "Claim-bearing content whose kind is fact_check.",
+        "corrections": "Fact-check or counterevidence content whose truth label contradicts the origin claim.",
+        "history_limit": "At most 200 recent per-tick samples are retained per state or experiment branch.",
+    }
+
+
 @app.get("/traces")
 def traces(
     request: Request,
@@ -495,6 +706,8 @@ def legacy_comparison_payload(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "experiment_id": result["experiment_id"],
         "universe_id": result["universe_id"],
+        "run_id": result.get("run_id"),
+        "status": result.get("status"),
         "seed": result["seed"],
         "ticks": result["ticks"],
         "control_metrics": result["control_metrics"],
@@ -549,6 +762,46 @@ def export_experiment_run(run_id: str, request: Request) -> Response:
     )
 
 
+@app.get("/experiment-runs/{run_id}/history")
+@app.get("/experiments/runs/{run_id}/history")
+def experiment_run_history(
+    run_id: str,
+    request: Request,
+    branch: Literal["control", "treatment"] | None = Query(default=None),
+    from_tick: int | None = Query(default=None, ge=0),
+    to_tick: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+) -> dict[str, Any]:
+    service = get_service(request)
+    run = service.store.get_experiment_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+    branches = [branch] if branch else ["control", "treatment"]
+    histories = {
+        current_branch: {
+            "samples": _history_samples(
+                service,
+                universe_id=str(run["universe_id"]),
+                run_id=run_id,
+                branch=current_branch,
+                from_tick=from_tick,
+                to_tick=to_tick,
+                limit=limit,
+            )
+        }
+        for current_branch in branches
+    }
+    return {
+        "run_id": run_id,
+        "experiment_id": run["experiment_id"],
+        "universe_id": run["universe_id"],
+        "seed": run.get("seed"),
+        "ticks": run.get("ticks"),
+        "branches": histories,
+        "metric_definitions": metric_definitions(),
+    }
+
+
 @app.get("/experiment-runs/{run_id}")
 @app.get("/experiments/runs/{run_id}")
 def get_experiment_run(run_id: str, request: Request) -> dict[str, Any]:
@@ -571,7 +824,7 @@ def run_catalog_experiment(payload: ExperimentRunRequest, request: Request) -> d
         )
     except (InterventionValidationError, ValidationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return legacy_comparison_payload(run["result"])
+    return legacy_comparison_payload({**run["result"], "run_id": run["run_id"], "status": run["status"]})
 
 
 def _earliest_divergence(control: SimulationState, treatment: SimulationState) -> dict[str, Any] | None:
@@ -604,7 +857,7 @@ def side_by_side(payload: ExperimentRequest, request: Request) -> ExperimentResu
 @app.post("/state/save")
 def save_state(request: Request) -> dict[str, object]:
     service = get_service(request)
-    return {"snapshot_id": service.store.save(service.state), "backend": service.store.backend_name}
+    return {"snapshot_id": service._save_canonical(service.state, "prime"), "backend": service.store.backend_name}
 
 
 @app.post("/state/load", response_model=SimulationState)

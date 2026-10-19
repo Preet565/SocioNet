@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.agents import TOPICS, create_citizens
+from app.analytics import MAX_CLAIM_PROVENANCE, record_metric_sample
 from app.beliefs import learn_from_content
 from app.communities import create_communities, join_community, leave_community
 from app.memory import remember, retrieve
@@ -12,6 +13,10 @@ from app.models import (
     ActionEvent,
     ActionKind,
     Agent,
+    Claim,
+    ClaimLifecycleEvent,
+    ClaimProvenanceRecord,
+    ClaimStatus,
     Content,
     ContentKind,
     DecisionTrace,
@@ -55,12 +60,122 @@ def create_initial_state(seed: int = 20261016, *, count: int = 100) -> Simulatio
                 relationship = relationship_for(agent, peer.id)
                 relationship.affinity = round((agent.ideology + peer.ideology) / 2 * 0.35, 4)
                 relationship.trust = round((agent.trust_baseline + peer.trust_baseline) / 2, 4)
-    return SimulationState(
+    state = SimulationState(
         seed=seed,
         agents=agents,
         communities=communities,
         config=SimulationConfig(),
     )
+    ensure_claim_registry(state)
+    record_metric_sample(state)
+    return state
+
+
+def stable_claim_id(content_id: str) -> str:
+    """Claim IDs are derived from deterministic origin content IDs and survive forks."""
+
+    return f"claim-{content_id}"
+
+
+def _latest_claim_content(state: SimulationState, topic: str | None) -> Content | None:
+    matching = [
+        content
+        for content in state.contents
+        if content.claim_id and (topic is None or content.topic == topic)
+    ]
+    return max(matching, key=lambda content: (content.created_tick, content.id), default=None)
+
+
+def _claim_status_for_evidence(claim: Claim, content: Content) -> tuple[ClaimStatus, str] | None:
+    if content.kind is not ContentKind.FACT_CHECK and not content.is_counterevidence:
+        return None
+    if content.claim_truth is None:
+        return None
+    if content.claim_truth != claim.truth_label:
+        return (
+            ClaimStatus.CORRECTED if claim.truth_label is False and content.claim_truth is True else ClaimStatus.DISPUTED,
+            "evidence contradicts the origin claim",
+        )
+    return ClaimStatus.CONFIRMED, "fact-check agrees with the origin claim"
+
+
+def _register_claim_content(
+    state: SimulationState,
+    content: Content,
+    *,
+    claim_id: str,
+    source: str,
+    intervention_id: str | None,
+) -> None:
+    claim = state.claims.get(claim_id)
+    if claim is None:
+        claim = Claim(
+            claim_id=claim_id,
+            topic=content.topic,
+            text=content.text,
+            truth_label=bool(content.claim_truth),
+            origin_content_id=content.id,
+            origin_author_id=content.author_id,
+            created_tick=content.created_tick,
+            origin_source=source,
+            origin_intervention_id=intervention_id,
+            lifecycle=[
+                ClaimLifecycleEvent(
+                    status=ClaimStatus.ACTIVE,
+                    tick=content.created_tick,
+                    content_id=content.id,
+                    actor_id=content.author_id,
+                    reason="claim originated",
+                )
+            ],
+        )
+        state.claims[claim_id] = claim
+    elif any(record.content_id == content.id for record in claim.provenance):
+        return
+    claim.provenance.append(
+        ClaimProvenanceRecord(
+            content_id=content.id,
+            kind=content.kind,
+            actor_id=content.author_id,
+            tick=content.created_tick,
+            parent_content_id=content.parent_id,
+            source=source,
+            intervention_id=intervention_id,
+        )
+    )
+    claim.provenance = claim.provenance[-MAX_CLAIM_PROVENANCE:]
+    transition = _claim_status_for_evidence(claim, content)
+    if transition and transition[0] is not claim.status:
+        claim.status = transition[0]
+        claim.lifecycle.append(
+            ClaimLifecycleEvent(
+                status=transition[0],
+                tick=content.created_tick,
+                content_id=content.id,
+                actor_id=content.author_id,
+                reason=transition[1],
+            )
+        )
+        claim.lifecycle = claim.lifecycle[-MAX_CLAIM_PROVENANCE:]
+
+
+def ensure_claim_registry(state: SimulationState) -> None:
+    """Hydrate additive claim fields when loading a pre-Phase-2 snapshot."""
+
+    content_by_id = {content.id: content for content in state.contents}
+    for content in sorted(state.contents, key=lambda item: (item.created_tick, item.id)):
+        if content.claim_truth is None:
+            continue
+        if content.claim_id is None:
+            parent = content_by_id.get(content.parent_id) if content.parent_id else None
+            content.claim_id = parent.claim_id if parent and parent.claim_id else stable_claim_id(content.id)
+        _register_claim_content(
+            state,
+            content,
+            claim_id=content.claim_id,
+            source=content.provenance,
+            intervention_id=content.intervention_id,
+        )
 
 
 def append_content(
@@ -74,9 +189,18 @@ def append_content(
     parent_id: str | None = None,
     credibility: float = 0.5,
     is_counterevidence: bool = False,
+    claim_id: str | None = None,
+    provenance: str = "organic",
+    intervention_id: str | None = None,
+    is_reshare: bool = False,
 ) -> Content:
+    content_id = f"content-{len(state.contents) + 1:06d}"
+    parent = next((item for item in reversed(state.contents) if item.id == parent_id), None) if parent_id else None
+    resolved_claim_id = claim_id or (parent.claim_id if parent else None)
+    if resolved_claim_id is None and claim_truth is not None:
+        resolved_claim_id = stable_claim_id(content_id)
     content = Content(
-        id=f"content-{len(state.contents) + 1:06d}",
+        id=content_id,
         author_id=author_id,
         kind=kind,
         topic=topic,
@@ -86,8 +210,20 @@ def append_content(
         created_tick=state.tick,
         credibility=max(0.0, min(1.0, credibility)),
         is_counterevidence=is_counterevidence,
+        claim_id=resolved_claim_id,
+        is_reshare=is_reshare,
+        provenance=provenance,
+        intervention_id=intervention_id,
     )
     state.contents.append(content)
+    if resolved_claim_id is not None and claim_truth is not None:
+        _register_claim_content(
+            state,
+            content,
+            claim_id=resolved_claim_id,
+            source=provenance,
+            intervention_id=intervention_id,
+        )
     return content
 
 
@@ -96,12 +232,16 @@ class Simulation:
 
     def __init__(self, seed: int = 20261016, state: SimulationState | None = None) -> None:
         self.state = state or create_initial_state(seed)
+        ensure_claim_registry(self.state)
+        if not any(sample.tick == self.state.tick for sample in self.state.metric_history):
+            record_metric_sample(self.state)
 
     def step(self) -> SimulationState:
         self.state.tick += 1
         self._apply_due_interventions()
         for agent_id in sorted(self.state.agents):
             self._run_agent_lifecycle(self.state.agents[agent_id])
+        record_metric_sample(self.state)
         return self.state
 
     def run(self, ticks: int) -> SimulationState:
@@ -169,6 +309,8 @@ class Simulation:
             action=result.action,
             target_id=result.target_id,
             content_id=result.content_id,
+            observed_content_id=content.id if content else None,
+            claim_id=content.claim_id if content and content.claim_id else self._claim_id_for_result(result),
             topic=result.topic,
             details=result.details,
         )
@@ -177,6 +319,12 @@ class Simulation:
             "event_id": event.event_id,
             "recorded": True,
         })
+
+    def _claim_id_for_result(self, result: ActionResult) -> str | None:
+        if result.content_id is None:
+            return None
+        created = next((item for item in reversed(self.state.contents) if item.id == result.content_id), None)
+        return created.claim_id if created else None
 
     def _observe(self, agent: Agent, rng) -> Content | None:
         visible = [content for content in self.state.contents[-self.state.config.observation_window:] if content.author_id != agent.id]
@@ -246,6 +394,7 @@ class Simulation:
                 claim_truth=content.claim_truth,
                 parent_id=content.id,
                 credibility=0.42 + agent.trust_baseline * 0.3,
+                is_reshare=content.claim_id is not None,
             )
             content.likes += 1
             return ActionResult(ActionKind.REPLY, target_id=target_id, content_id=created.id, topic=content.topic, details="replied to content")

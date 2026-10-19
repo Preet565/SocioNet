@@ -34,7 +34,10 @@ Useful endpoints:
 - `GET /experiment-runs?universe_id=prime|echo` — list durable run status and provenance.
 - `GET /experiment-runs/{run_id}` — retrieve a complete run record, including its result and tagged snapshots.
 - `GET /experiment-runs/{run_id}/export` — download the run record as JSON.
+- `GET /experiment-runs/{run_id}/history` — persisted control/treatment metric samples with tick-range filters.
 - `GET /analytics` — calculated engagement, belief, relationship, polarization, and topic metrics.
+- `GET /analytics/history` — current-universe or durable-run per-tick history with branch and tick filters.
+- `GET /analytics/claims` and `GET /analytics/claims/{claim_id}` — claim lifecycle/provenance and exposure, reshare, reply, fact-check, and correction analytics.
 - `GET /traces?tick=1` — decision traces for every lifecycle phase.
 - `GET /export/json` — downloadable state JSON.
 - `POST /state/save` and `POST /state/load` — canonical Prime snapshot persistence; experiment artifacts are filtered out of this compatibility path.
@@ -54,7 +57,7 @@ cd backend
 make test
 ```
 
-The suite covers the 100-citizen seed, lifecycle transitions, beliefs, memories, relationships, invalid interventions, delayed counterevidence, reproducibility, analytics, experiments, persistence, additive SQLite migration, provenance filtering, durable run retrieval/export, and API behavior.
+The suite covers the 100-citizen seed, lifecycle transitions, beliefs, memories, relationships, invalid interventions, delayed counterevidence, reproducibility, analytics, experiments, persistence, additive SQLite migration and old snapshots, deterministic history, claim lifecycle/provenance, filtered history APIs, durable run retrieval/export, and experiment history after restart.
 
 ## Docker deploy
 
@@ -66,4 +69,4 @@ docker build -t npc-internet-backend .
 docker run --rm -p 8000:8000 -v "$PWD/data:/app/data" npc-internet-backend
 ```
 
-SQLite snapshots and experiment runs are written to `./data/socionet.sqlite3` by default. The repository initializes or additively migrates its schema on open. If SQLite cannot be opened, the repository falls back to the original canonical JSON snapshot plus tagged snapshot/run sidecars beside the configured database path.
+SQLite snapshots, experiment runs, and normalized metric history are written to `./data/socionet.sqlite3` by default. The repository initializes or additively migrates its schema on open. If SQLite cannot be opened, the repository falls back to the original canonical JSON snapshot plus tagged snapshot/run/metric sidecars beside the configured database path. History retention is bounded to 200 recent samples per state or branch.

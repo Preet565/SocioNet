@@ -11,6 +11,8 @@ NPC Internet is a local, deterministic civilization simulator. One hundred ficti
 - Sparse seeded social graph that changes through interactions and relationship updates.
 - Bounded discrete ticks, delayed interventions, reproducible branch execution, and SQLite snapshot persistence.
 - Durable experiment runs with explicit source/control/treatment snapshot provenance, additive SQLite schema migration, and canonical Prime filtering.
+- Per-tick metric history with bounded durable branch samples and deterministic tick ordering.
+- First-class stable claim IDs, claim lifecycle/provenance, and claim-specific exposure, reshare, reply, fact-check, and correction metrics.
 - FastAPI projections for overview, graph, citizens, feed, event stream, interventions, minds, metrics, export, and experiments.
 - Butterfly Lab catalog with the **One rumor, two universes** scenario: a false fictional civic-event claim is run against a delayed credible counterevidence branch from the same snapshot.
 - Dark, responsive React command center with actual API-driven SVG topology, profiles, feed, trace explorer, metrics, and comparison readouts.
@@ -81,7 +83,7 @@ cd frontend && npm run build
 1. Start both services and open the dashboard.
 2. Select **Civilization Overview** and click **Reset both / run demo flow** or the prominent **Run the demo flow** button.
 3. The UI resets Prime and Echo, advances the synchronized starting frame, and requests the backend's `rumor-counterevidence` experiment.
-4. Open **Butterfly Lab**. The result card shows the actual seed, branch tick count, calculated metric deltas, and earliest recorded divergence. Before the run, no result is shown.
+4. Open **Butterfly Lab**. The result card shows the actual seed, branch tick count, calculated metric deltas, earliest recorded divergence, and an interactive chart backed by persisted control/treatment samples. Before the run, no result is shown.
 5. Use **One rumor, two universes → Run experiment** to rerun it. The scenario forks an identical serialized snapshot; control gets only the unverified fictional claim while treatment receives credible counterevidence after two ticks. The durable run history shows the source and branch snapshot tags and provides an export link.
 6. Open **Information Ecosystem** to inspect actual posts, claim status, credibility, exposure counts, and the event stream. Open **Social Universe** to see graph nodes and relationship edges derived from the state.
 7. Select a citizen in **Citizen Observatory** for beliefs, memories, relationships, interests, recent decisions, and the executed trace. **Agent Mind Explorer** exposes structured decision evidence, not fabricated hidden chain-of-thought.
@@ -124,9 +126,12 @@ curl -X POST http://127.0.0.1:8000/reset \
 - `POST /simulate/tick` for the canonical world; `POST /tick` for a universe projection
 - `POST /reset`
 - `GET /analytics`
+- `GET /analytics/history` with universe, run/branch, tick-range, and bounded-limit filters
+- `GET /analytics/claims` and `GET /analytics/claims/{claim_id}` for lifecycle, provenance, and claim-specific metric filters
 - `GET /citizens`, `GET /citizens/{citizen_id}`
 - `GET /experiments`, `POST /experiments/run`, `POST /experiments/side-by-side`
 - `POST /experiment-runs` (also `/experiments/runs`) to create a durable run; `GET` on the same collection and `/{run_id}` to list/retrieve; `/{run_id}/export` to download its JSON provenance/result record
+- `GET /experiment-runs/{run_id}/history` (also `/experiments/runs/{run_id}/history`) for persisted control/treatment time series
 - `POST /interventions`
 - `GET /traces`, `GET /export/json`
 - `POST /state/save`, `POST /state/load`
@@ -162,4 +167,7 @@ Open <http://127.0.0.1:8080>. If Docker Desktop is not running, use the local co
 - The graph layout is deterministic seeded geometry for a stable SVG view, not a physics solver; topology and edge weights are real state.
 - Experiment branch execution remains an in-process deterministic calculation, while its result, status, and tagged source/control/treatment snapshots are now durable in SQLite. The JSON fallback keeps the canonical file contract and writes tagged experiment artifacts and run records to sidecars.
 - Canonical state loading is filtered to `provenance=canonical` and `universe_id=prime`; experiment snapshots cannot replace Prime through the existing state-load path.
+- Metric and claim history is bounded to the most recent 200 samples per state/branch; old snapshots can be hydrated with stable claim IDs but cannot reconstruct samples that were never recorded.
+- Claim exposures count recorded observations represented by action events, not passive reach; replies are also counted as claim reshares when they carry a claim ID. These are synthetic event-log measures, not measurements of real-world audiences.
+- Phase 2 records one deterministic branch pair per run. Multi-seed batches, statistical confidence, causal ancestry, and cross-run aggregation remain later phases.
 - Metrics are synthetic measurements of a fictional population and must not be interpreted as evidence about real people or communities.

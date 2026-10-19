@@ -97,4 +97,6 @@ def test_existing_sqlite_schema_is_migrated_additively(tmp_path) -> None:
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(snapshots)")}
         assert {"provenance", "universe_id", "experiment_run_id"} <= columns
-        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "2"
+        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "3"
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert {"metric_samples", "claim_metric_samples"} <= tables

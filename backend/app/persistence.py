@@ -15,14 +15,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.models import SimulationState
+from app.models import MetricSample, SimulationState
 
 
 CANONICAL_PROVENANCE = "canonical"
 EXPERIMENT_SOURCE_PROVENANCE = "experiment_source"
 EXPERIMENT_CONTROL_PROVENANCE = "experiment_control"
 EXPERIMENT_TREATMENT_PROVENANCE = "experiment_treatment"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _now() -> str:
@@ -60,6 +60,26 @@ class StateRepository(Protocol):
     def get_experiment_run(self, run_id: str) -> dict[str, Any] | None: ...
 
     def list_experiment_runs(self, universe_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    def save_metric_history(
+        self,
+        samples: list[MetricSample],
+        *,
+        scope_id: str,
+        branch: str,
+        universe_id: str,
+        run_id: str | None = None,
+    ) -> None: ...
+
+    def list_metric_history(
+        self,
+        *,
+        scope_id: str,
+        branch: str,
+        from_tick: int | None = None,
+        to_tick: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]: ...
 
 
 class SQLiteRepository:
@@ -132,9 +152,40 @@ class SQLiteRepository:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metric_samples (
+                scope_id TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                universe_id TEXT NOT NULL,
+                run_id TEXT,
+                tick INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (scope_id, branch, tick)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS claim_metric_samples (
+                scope_id TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                universe_id TEXT NOT NULL,
+                run_id TEXT,
+                tick INTEGER NOT NULL,
+                claim_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (scope_id, branch, tick, claim_id)
+            )
+            """
+        )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_provenance ON snapshots (provenance, universe_id, snapshot_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_run ON snapshots (experiment_run_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_experiment_runs_universe ON experiment_runs (universe_id, updated_at DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_metric_samples_run ON metric_samples (run_id, branch, tick)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_claim_metric_samples_claim ON claim_metric_samples (scope_id, branch, claim_id, tick)")
         connection.execute(
             "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -285,6 +336,71 @@ class SQLiteRepository:
                 ).fetchall()
         return [self._row_to_run(row) for row in rows]
 
+    def save_metric_history(
+        self,
+        samples: list[MetricSample],
+        *,
+        scope_id: str,
+        branch: str,
+        universe_id: str,
+        run_id: str | None = None,
+    ) -> None:
+        bounded = sorted(samples, key=lambda sample: sample.tick)[-200:]
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("DELETE FROM metric_samples WHERE scope_id = ? AND branch = ?", (scope_id, branch))
+            connection.execute("DELETE FROM claim_metric_samples WHERE scope_id = ? AND branch = ?", (scope_id, branch))
+            for sample in bounded:
+                payload = sample.model_dump(mode="json")
+                connection.execute(
+                    "INSERT INTO metric_samples (scope_id, branch, universe_id, run_id, tick, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (scope_id, branch, universe_id, run_id, sample.tick, json.dumps(payload, separators=(",", ":")), _now()),
+                )
+                for claim_id, claim_payload in sorted(sample.metrics.claim_metrics.items()):
+                    connection.execute(
+                        "INSERT INTO claim_metric_samples (scope_id, branch, universe_id, run_id, tick, claim_id, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            scope_id,
+                            branch,
+                            universe_id,
+                            run_id,
+                            sample.tick,
+                            claim_id,
+                            json.dumps(claim_payload.model_dump(mode="json"), separators=(",", ":")),
+                            _now(),
+                        ),
+                    )
+
+    def list_metric_history(
+        self,
+        *,
+        scope_id: str,
+        branch: str,
+        from_tick: int | None = None,
+        to_tick: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["scope_id = ?", "branch = ?"]
+        parameters: list[Any] = [scope_id, branch]
+        if from_tick is not None:
+            clauses.append("tick >= ?")
+            parameters.append(from_tick)
+        if to_tick is not None:
+            clauses.append("tick <= ?")
+            parameters.append(to_tick)
+        parameters.append(min(200, max(1, limit)))
+        query = f"SELECT payload FROM metric_samples WHERE {' AND '.join(clauses)} ORDER BY tick ASC LIMIT ?"
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        values: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row[0])
+            except (TypeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                values.append(payload)
+        return values
+
 
 class JSONRepository:
     backend_name = "json"
@@ -300,6 +416,10 @@ class JSONRepository:
     @property
     def _experiment_runs_path(self) -> Path:
         return self.path.with_suffix(".experiments.json")
+
+    @property
+    def _metric_history_path(self) -> Path:
+        return self.path.with_suffix(".metrics.json")
 
     def _read_list(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
@@ -413,6 +533,54 @@ class JSONRepository:
             values = [item for item in values if item.get("universe_id") == universe_id]
         return sorted(values, key=lambda item: str(item.get("updated_at", item.get("created_at", ""))), reverse=True)
 
+    def save_metric_history(
+        self,
+        samples: list[MetricSample],
+        *,
+        scope_id: str,
+        branch: str,
+        universe_id: str,
+        run_id: str | None = None,
+    ) -> None:
+        values = [
+            item
+            for item in self._read_list(self._metric_history_path)
+            if not (item.get("scope_id") == scope_id and item.get("branch") == branch)
+        ]
+        values.extend(
+            {
+                "scope_id": scope_id,
+                "branch": branch,
+                "universe_id": universe_id,
+                "run_id": run_id,
+                "tick": sample.tick,
+                "payload": sample.model_dump(mode="json"),
+            }
+            for sample in sorted(samples, key=lambda sample: sample.tick)[-200:]
+        )
+        self._write_list(self._metric_history_path, values)
+
+    def list_metric_history(
+        self,
+        *,
+        scope_id: str,
+        branch: str,
+        from_tick: int | None = None,
+        to_tick: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        rows = [
+            item
+            for item in self._read_list(self._metric_history_path)
+            if item.get("scope_id") == scope_id and item.get("branch") == branch
+        ]
+        if from_tick is not None:
+            rows = [item for item in rows if int(item.get("tick", 0)) >= from_tick]
+        if to_tick is not None:
+            rows = [item for item in rows if int(item.get("tick", 0)) <= to_tick]
+        rows.sort(key=lambda item: int(item.get("tick", 0)))
+        return [item["payload"] for item in rows[: min(200, max(1, limit))] if isinstance(item.get("payload"), dict)]
+
 
 class StateStore:
     """Prefer SQLite, but keep a usable JSON file if SQLite is unavailable."""
@@ -463,6 +631,40 @@ class StateStore:
 
     def list_experiment_runs(self, universe_id: str | None = None) -> list[dict[str, Any]]:
         return self.repository.list_experiment_runs(universe_id)
+
+    def save_metric_history(
+        self,
+        samples: list[MetricSample],
+        *,
+        scope_id: str,
+        branch: str,
+        universe_id: str,
+        run_id: str | None = None,
+    ) -> None:
+        self.repository.save_metric_history(
+            samples,
+            scope_id=scope_id,
+            branch=branch,
+            universe_id=universe_id,
+            run_id=run_id,
+        )
+
+    def list_metric_history(
+        self,
+        *,
+        scope_id: str,
+        branch: str,
+        from_tick: int | None = None,
+        to_tick: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        return self.repository.list_metric_history(
+            scope_id=scope_id,
+            branch=branch,
+            from_tick=from_tick,
+            to_tick=to_tick,
+            limit=limit,
+        )
 
 
 def export_json(state: SimulationState, destination: str | Path | None = None) -> str:

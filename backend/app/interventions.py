@@ -10,7 +10,7 @@ from app.models import (
     ScheduledIntervention,
     SimulationState,
 )
-from app.simulation import append_content
+from app.simulation import _latest_claim_content, append_content
 
 
 class InterventionValidationError(ValueError):
@@ -76,6 +76,7 @@ def apply_now(state: SimulationState, intervention: Intervention, *, interventio
     validate_intervention(state, intervention)
     if intervention.kind is InterventionKind.COUNTEREVIDENCE:
         author_id = intervention.agent_id or sorted(state.agents)[0]
+        parent = _latest_claim_content(state, intervention.topic)
         append_content(
             state,
             author_id=author_id,
@@ -83,8 +84,12 @@ def apply_now(state: SimulationState, intervention: Intervention, *, interventio
             topic=intervention.topic or "fictional evidence",
             text=intervention.text or f"A delayed fictional counterpoint addresses {intervention.topic}.",
             claim_truth=intervention.truth_label if intervention.truth_label is not None else True,
+            parent_id=parent.id if parent else None,
             credibility=0.6 + intervention.strength * 0.4,
             is_counterevidence=True,
+            claim_id=parent.claim_id if parent else None,
+            provenance="intervention",
+            intervention_id=intervention_id,
         )
     elif intervention.kind is InterventionKind.SEED_POST:
         author_id = intervention.agent_id or sorted(state.agents)[0]
@@ -96,6 +101,8 @@ def apply_now(state: SimulationState, intervention: Intervention, *, interventio
             text=intervention.text or "A fictional seeded post.",
             claim_truth=intervention.truth_label,
             credibility=0.4 + intervention.strength * 0.5,
+            provenance="intervention",
+            intervention_id=intervention_id,
         )
     elif intervention.kind is InterventionKind.TRUST_SHIFT:
         target_id = intervention.target_agent_id

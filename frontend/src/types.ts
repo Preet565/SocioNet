@@ -123,6 +123,10 @@ export interface FeedPost {
   likes: number
   fact_checked: boolean
   is_counterevidence: boolean
+  claim_id?: string | null
+  is_reshare?: boolean
+  provenance?: string
+  intervention_id?: string | null
   exposureCount: number
 }
 
@@ -133,6 +137,8 @@ export interface WorldEvent {
   action: string
   target_id?: string | null
   content_id?: string | null
+  observed_content_id?: string | null
+  claim_id?: string | null
   topic?: string | null
   details: string
 }
@@ -154,6 +160,7 @@ export interface UniverseState {
   posts?: FeedPost[]
   events?: WorldEvent[]
   communities?: Array<{ id: string; name: string; topic: string; description: string; member_ids: string[] }>
+  metricsDetail?: MetricsDetail
 }
 
 export interface HealthResponse {
@@ -175,6 +182,112 @@ export interface ExperimentMetricSnapshot {
   polarization: number
   belief_accuracy: number
   engagement_rate: number
+  exposure_rate: number
+  reshare_rate: number
+  correction_reach: number
+  time_until_claim_stops_spreading: number
+  claim_metrics?: Record<string, ClaimMetricSnapshot>
+}
+
+export type ClaimStatus = 'active' | 'disputed' | 'confirmed' | 'corrected'
+
+export interface ClaimMetricSnapshot {
+  claim_id: string
+  topic: string
+  status: ClaimStatus
+  truth_label: boolean
+  first_tick: number
+  last_tick: number
+  exposures: number
+  unique_exposed_agents: number
+  reshares: number
+  unique_resharers: number
+  replies: number
+  fact_checks: number
+  corrections: number
+}
+
+export interface ClaimLifecycleEvent {
+  status: ClaimStatus
+  tick: number
+  content_id?: string | null
+  actor_id?: string | null
+  reason: string
+}
+
+export interface ClaimProvenanceRecord {
+  content_id: string
+  kind: string
+  actor_id: string
+  tick: number
+  parent_content_id?: string | null
+  source: string
+  intervention_id?: string | null
+}
+
+export interface ClaimRecord {
+  claim_id: string
+  topic: string
+  text: string
+  truth_label: boolean
+  origin_content_id: string
+  origin_author_id: string
+  created_tick: number
+  origin_source: string
+  origin_intervention_id?: string | null
+  status: ClaimStatus
+  provenance: ClaimProvenanceRecord[]
+  lifecycle: ClaimLifecycleEvent[]
+  metrics?: ClaimMetricSnapshot | null
+}
+
+export interface MetricsDetail {
+  tick: number
+  population: number
+  total_contents: number
+  posts: number
+  replies: number
+  fact_checks: number
+  ignored_decisions: number
+  follows: number
+  unfollows: number
+  community_joins: number
+  community_leaves: number
+  active_agents: number
+  average_belief_confidence: number
+  average_relationship_trust: number
+  polarization: number
+  belief_accuracy: number
+  engagement_rate: number
+  exposure_rate: number
+  reshare_rate: number
+  correction_reach: number
+  community_fragmentation: number
+  time_until_claim_stops_spreading: number
+  topic_metrics: Record<string, Record<string, number>>
+  claim_metrics: Record<string, ClaimMetricSnapshot>
+}
+
+export interface MetricHistorySample {
+  tick: number
+  metrics: ExperimentMetricSnapshot
+}
+
+export interface ExperimentHistoryBranch {
+  samples: MetricHistorySample[]
+}
+
+export interface ExperimentHistory {
+  run_id: string
+  experiment_id: string
+  universe_id: UniverseId
+  seed: number
+  ticks: number
+  branches: {
+    control?: ExperimentHistoryBranch
+    treatment?: ExperimentHistoryBranch
+  }
+  metric_definitions: Record<string, string>
 }
 
 export interface ExperimentComparison {

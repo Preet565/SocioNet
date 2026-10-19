@@ -6,7 +6,7 @@ The project is deliberately two local processes:
 
 - `backend/app/` owns the only mutable simulation state and exposes FastAPI.
 - `frontend/src/` owns view state and presentation; it never fabricates live results.
-- SQLite stores canonical Prime snapshots, durable experiment run records, and tagged source/control/treatment artifacts. Canonical state loading filters on `provenance=canonical` and `universe_id=prime`, so a branch snapshot cannot replace Prime. The JSON fallback preserves the canonical single-file snapshot and uses sidecars for tagged experiment artifacts and runs.
+- SQLite stores canonical Prime snapshots, durable experiment run records, tagged source/control/treatment artifacts, and normalized per-tick metric samples. Canonical state loading filters on `provenance=canonical` and `universe_id=prime`, so a branch snapshot cannot replace Prime. The JSON fallback preserves the canonical single-file snapshot and uses sidecars for tagged experiment artifacts, runs, and metric samples.
 
 ## Simulation lifecycle
 
@@ -32,8 +32,8 @@ The trace contains execution facts and rule inputs. It does not claim to expose 
 - `simulation.py`: tick orchestration and lifecycle.
 - `interventions.py`: typed validation, immediate/delayed application, intervention history.
 - `experiments.py`: deep-copy fork from one snapshot and metric comparison.
-- `analytics.py`: event-derived metrics.
-- `persistence.py`: additive SQLite schema migration, provenance-filtered snapshots, durable experiment runs, and JSON fallback.
+- `analytics.py`: event-derived metrics, claim-specific metrics, and bounded history samples.
+- `persistence.py`: additive SQLite schema migration, provenance-filtered snapshots, durable experiment runs, normalized metric/claim history, and JSON fallback.
 - `presentation.py`: read-only browser projections derived from state.
 - `main.py`: request validation, locking, API routes, and compatibility endpoints.
 
@@ -42,6 +42,12 @@ The trace contains execution facts and rule inputs. It does not claim to expose 
 `run_side_by_side()` deep-copies the exact input snapshot twice before applying any branch intervention. It then executes both simulations with the same seed and deterministic per-agent RNG derivation. The catalog demo applies the same false fictional seed post to both branches; Echo also gets true, high-credibility counterevidence at tick +2. The output includes calculated metrics and the first differing recorded event.
 
 Each API-created run first stores a tagged `experiment_source` snapshot, records `running` status, then stores `experiment_control` and `experiment_treatment` snapshots and updates the run to `completed`. Failed calculations remain as durable `failed` records. The catalog projection derives its status and last-run metadata from these records rather than process memory.
+
+## Claims and history
+
+Every claim-bearing origin content receives a stable `claim-{origin-content-id}` identifier. Replies, fact-checks, and counterevidence inherit the origin claim ID; branch forks therefore retain claim identity even when later content IDs diverge. A claim records its origin, source/intervention provenance, bounded content lineage, and lifecycle transitions (`active`, `disputed`, `confirmed`, or `corrected`). Old snapshots without these additive fields are accepted and hydrated when loaded.
+
+`Simulation.step()` records one `MetricSample` after the complete tick in deterministic citizen-ID order. The initial frame is sample tick 0. Each state retains at most 200 recent samples. Durable experiment branches additionally write those samples to `metric_samples` and claim rows to `claim_metric_samples`, keyed by run, branch, and tick. This makes `/analytics/history` and `/experiment-runs/{run_id}/history` restart-safe without changing the legacy comparison response.
 
 ## Metrics
 
@@ -55,4 +61,12 @@ Each API-created run first stores a tagged `experiment_source` snapshot, records
 - **Information entropy proxy**: `1 - belief_accuracy`, where belief accuracy is evidence-for / all evidence counts. This is a synthetic proxy, not Shannon entropy.
 - **Time until claim stops spreading**: current tick minus the latest claim-bearing content tick (zero when no claim has been observed yet).
 
-Every metric is recomputed from the current state and event log. Values describe a fictional model only.
+Claim-specific history uses these definitions:
+
+- **Claim exposure**: one recorded agent action that observed a claim-bearing content item; unique exposure is the distinct actor count.
+- **Claim reshare**: a claim-bearing reply or content explicitly marked as a repeat; it can overlap with the reply count by design.
+- **Claim reply**: claim-bearing content with `kind=reply`.
+- **Claim fact-check**: claim-bearing content with `kind=fact_check`.
+- **Claim correction**: fact-check or counterevidence whose truth label contradicts the origin claim; this transition marks a false claim `corrected`.
+
+The historical endpoints accept bounded tick ranges, branch/run filters, claim ID, status, and topic filters. The Butterfly Lab chart renders persisted control/treatment samples and lets the observer switch between content, exposure, reshare, correction, engagement, and polarization series. Every metric is recomputed from the current state and event log. Values describe a fictional model only.
