@@ -64,4 +64,38 @@ The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it
 
 - Only the most recent 200 samples are retained per state/branch; an old snapshot can be hydrated but cannot recover history that was never persisted.
 - Exposure is an action-log observation count, not passive audience reach. Reshares intentionally overlap claim-bearing replies because the current domain has no separate reshare action.
-- A run remains one deterministic control/treatment pair. Multi-seed batches, statistical summaries, causal ancestry, and cross-run aggregation remain later phases.
+- A single run remains one deterministic control/treatment pair; Phase 3 adds a separate bounded batch layer for repeated pairs and cross-run summaries. Causal ancestry remains a later phase.
+
+## Phase 3 — multi-seed experiments and statistical robustness
+
+### Implemented
+
+- Added strict `BatchExperimentConfig` and objective models with bounded population, ticks, repetitions, intervention lists, confidence level, scalar objective metrics, and computational budget validation.
+- Added stable SHA-256 seed derivation from a base seed and one-based repetition. Each repetition uses one pair seed for identical control/treatment source state initialization.
+- Added bounded serial batch execution under the existing service lock. The batch and each child run are persisted before execution, after each repetition, and at final aggregation.
+- Added additive SQLite columns/indexes and JSON sidecars for batch metadata, progress, aggregate output, batch IDs, repetition numbers, and pair/arm seed metadata on child runs.
+- Added control, treatment, and paired descriptive statistics; exact distribution-free paired-median confidence intervals; paired Cohen's d; Cliff's delta; probability treatment is better; and explicit objective success rate over successful pairs.
+- Added batch collection, detail, progress/status, and linked-child-run APIs with `/experiments/batches` compatibility aliases.
+- Added real-data Butterfly Lab batch controls and durable batch history using the API's returned progress and aggregate result. Offline preview does not claim to have run a batch.
+- Added targeted validation, statistics, persistence, API, restart, and deterministic-repeat tests.
+
+### Verification
+
+Commands run:
+
+```text
+python3 -m pytest tests/test_batch_experiments.py tests/test_persistence.py tests/test_api.py  # 17 passed
+python3 -m pytest                                                                        # 34 passed
+make test                                                                                # backend tests passed; frontend typecheck/build passed
+cd frontend && npm run typecheck                                                        # passed
+cd frontend && npm run build                                                            # passed
+git diff --check                                                                        # passed
+```
+
+The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it does not fail the suite.
+
+### Known limitations
+
+- Batch execution is synchronous, serial, and in-process. There is no background queue, cancellation, live polling during the request, or distributed worker support.
+- Batch confidence intervals describe the paired median with a conservative exact order-statistic method; they are not claims about real-world populations.
+- Failed children are retained as durable `failed` runs and excluded from paired aggregate statistics; a batch can finish as `completed_with_failures`.

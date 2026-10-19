@@ -22,7 +22,7 @@ CANONICAL_PROVENANCE = "canonical"
 EXPERIMENT_SOURCE_PROVENANCE = "experiment_source"
 EXPERIMENT_CONTROL_PROVENANCE = "experiment_control"
 EXPERIMENT_TREATMENT_PROVENANCE = "experiment_treatment"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _now() -> str:
@@ -60,6 +60,12 @@ class StateRepository(Protocol):
     def get_experiment_run(self, run_id: str) -> dict[str, Any] | None: ...
 
     def list_experiment_runs(self, universe_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    def save_experiment_batch(self, batch: dict[str, Any]) -> None: ...
+
+    def get_experiment_batch(self, batch_id: str) -> dict[str, Any] | None: ...
+
+    def list_experiment_batches(self, universe_id: str | None = None) -> list[dict[str, Any]]: ...
 
     def save_metric_history(
         self,
@@ -152,6 +158,32 @@ class SQLiteRepository:
             )
             """
         )
+        run_columns = {row[1] for row in connection.execute("PRAGMA table_info(experiment_runs)").fetchall()}
+        run_migrations = {
+            "batch_id": "TEXT",
+            "repetition": "INTEGER",
+            "arm_seed": "INTEGER",
+        }
+        for name, definition in run_migrations.items():
+            if name not in run_columns:
+                connection.execute(f"ALTER TABLE experiment_runs ADD COLUMN {name} {definition}")
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS experiment_batches (
+                batch_id TEXT PRIMARY KEY,
+                experiment_id TEXT NOT NULL,
+                universe_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total_runs INTEGER NOT NULL,
+                completed_runs INTEGER NOT NULL,
+                failed_runs INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS metric_samples (
@@ -184,6 +216,8 @@ class SQLiteRepository:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_provenance ON snapshots (provenance, universe_id, snapshot_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_run ON snapshots (experiment_run_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_experiment_runs_universe ON experiment_runs (universe_id, updated_at DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_experiment_runs_batch ON experiment_runs (batch_id, repetition)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_experiment_batches_universe ON experiment_batches (universe_id, updated_at DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_metric_samples_run ON metric_samples (run_id, branch, tick)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_claim_metric_samples_claim ON claim_metric_samples (scope_id, branch, claim_id, tick)")
         connection.execute(
@@ -214,6 +248,9 @@ class SQLiteRepository:
                 "treatment_snapshot_id": row["treatment_snapshot_id"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
+                "batch_id": row["batch_id"],
+                "repetition": row["repetition"],
+                "arm_seed": row["arm_seed"],
             }
         )
         return payload
@@ -286,8 +323,8 @@ class SQLiteRepository:
                 INSERT INTO experiment_runs (
                     run_id, experiment_id, universe_id, status, seed, source_tick, ticks,
                     source_snapshot_id, control_snapshot_id, treatment_snapshot_id,
-                    payload, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    batch_id, repetition, arm_seed, payload, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     experiment_id = excluded.experiment_id,
                     universe_id = excluded.universe_id,
@@ -298,6 +335,9 @@ class SQLiteRepository:
                     source_snapshot_id = excluded.source_snapshot_id,
                     control_snapshot_id = excluded.control_snapshot_id,
                     treatment_snapshot_id = excluded.treatment_snapshot_id,
+                    batch_id = excluded.batch_id,
+                    repetition = excluded.repetition,
+                    arm_seed = excluded.arm_seed,
                     payload = excluded.payload,
                     updated_at = excluded.updated_at
                 """,
@@ -312,6 +352,9 @@ class SQLiteRepository:
                     run.get("source_snapshot_id"),
                     run.get("control_snapshot_id"),
                     run.get("treatment_snapshot_id"),
+                    run.get("batch_id"),
+                    run.get("repetition"),
+                    run.get("arm_seed", run.get("seed")),
                     payload,
                     created_at,
                     now,
@@ -335,6 +378,82 @@ class SQLiteRepository:
                     (universe_id,),
                 ).fetchall()
         return [self._row_to_run(row) for row in rows]
+
+    @staticmethod
+    def _row_to_batch(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update(
+            {
+                "batch_id": row["batch_id"],
+                "experiment_id": row["experiment_id"],
+                "universe_id": row["universe_id"],
+                "status": row["status"],
+                "total_runs": row["total_runs"],
+                "completed_runs": row["completed_runs"],
+                "failed_runs": row["failed_runs"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+        return payload
+
+    def save_experiment_batch(self, batch: dict[str, Any]) -> None:
+        now = str(batch.get("updated_at") or _now())
+        created_at = str(batch.get("created_at") or now)
+        payload = json.dumps(batch, separators=(",", ":"))
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT INTO experiment_batches (
+                    batch_id, experiment_id, universe_id, status, total_runs,
+                    completed_runs, failed_runs, payload, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(batch_id) DO UPDATE SET
+                    experiment_id = excluded.experiment_id,
+                    universe_id = excluded.universe_id,
+                    status = excluded.status,
+                    total_runs = excluded.total_runs,
+                    completed_runs = excluded.completed_runs,
+                    failed_runs = excluded.failed_runs,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(batch["batch_id"]),
+                    str(batch["experiment_id"]),
+                    str(batch["universe_id"]),
+                    str(batch["status"]),
+                    int(batch.get("total_runs", 0)),
+                    int(batch.get("completed_runs", 0)),
+                    int(batch.get("failed_runs", 0)),
+                    payload,
+                    created_at,
+                    now,
+                ),
+            )
+
+    def get_experiment_batch(self, batch_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute("SELECT * FROM experiment_batches WHERE batch_id = ?", (batch_id,)).fetchone()
+        return self._row_to_batch(row) if row is not None else None
+
+    def list_experiment_batches(self, universe_id: str | None = None) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            if universe_id is None:
+                rows = connection.execute("SELECT * FROM experiment_batches ORDER BY updated_at DESC, batch_id DESC").fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM experiment_batches WHERE universe_id = ? ORDER BY updated_at DESC, batch_id DESC",
+                    (universe_id,),
+                ).fetchall()
+        return [self._row_to_batch(row) for row in rows]
 
     def save_metric_history(
         self,
@@ -416,6 +535,10 @@ class JSONRepository:
     @property
     def _experiment_runs_path(self) -> Path:
         return self.path.with_suffix(".experiments.json")
+
+    @property
+    def _experiment_batches_path(self) -> Path:
+        return self.path.with_suffix(".batches.json")
 
     @property
     def _metric_history_path(self) -> Path:
@@ -533,6 +656,21 @@ class JSONRepository:
             values = [item for item in values if item.get("universe_id") == universe_id]
         return sorted(values, key=lambda item: str(item.get("updated_at", item.get("created_at", ""))), reverse=True)
 
+    def save_experiment_batch(self, batch: dict[str, Any]) -> None:
+        values = self._read_list(self._experiment_batches_path)
+        values = [item for item in values if item.get("batch_id") != batch.get("batch_id")]
+        values.append(batch)
+        self._write_list(self._experiment_batches_path, values)
+
+    def get_experiment_batch(self, batch_id: str) -> dict[str, Any] | None:
+        return next((item for item in self._read_list(self._experiment_batches_path) if item.get("batch_id") == batch_id), None)
+
+    def list_experiment_batches(self, universe_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._read_list(self._experiment_batches_path)
+        if universe_id is not None:
+            values = [item for item in values if item.get("universe_id") == universe_id]
+        return sorted(values, key=lambda item: str(item.get("updated_at", item.get("created_at", ""))), reverse=True)
+
     def save_metric_history(
         self,
         samples: list[MetricSample],
@@ -631,6 +769,15 @@ class StateStore:
 
     def list_experiment_runs(self, universe_id: str | None = None) -> list[dict[str, Any]]:
         return self.repository.list_experiment_runs(universe_id)
+
+    def save_experiment_batch(self, batch: dict[str, Any]) -> None:
+        self.repository.save_experiment_batch(batch)
+
+    def get_experiment_batch(self, batch_id: str) -> dict[str, Any] | None:
+        return self.repository.get_experiment_batch(batch_id)
+
+    def list_experiment_batches(self, universe_id: str | None = None) -> list[dict[str, Any]]:
+        return self.repository.list_experiment_batches(universe_id)
 
     def save_metric_history(
         self,

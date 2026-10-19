@@ -332,6 +332,94 @@ export interface ExperimentRun {
   error?: string
 }
 
+export interface BatchExperimentConfigInput {
+  universeId: UniverseId
+  experimentId: string
+  baseSeed?: number
+  population: number
+  ticks: number
+  repetitions: number
+  computationalBudget: number
+  confidenceLevel: number
+  objective: {
+    metric: string
+    direction: 'increase' | 'decrease'
+    threshold: number
+  }
+}
+
+export interface BatchProgress {
+  totalRuns: number
+  completedRuns: number
+  failedRuns: number
+  percentComplete: number
+  currentRepetition?: number
+  executionMode: 'serial_synchronous'
+}
+
+export interface BatchDescriptiveStatistics {
+  count: number
+  mean?: number | null
+  median?: number | null
+  variance?: number | null
+  standardDeviation?: number | null
+  confidenceInterval?: { lower: number; upper: number; level: number; method: string } | null
+}
+
+export interface BatchMetricSummary {
+  control: BatchDescriptiveStatistics
+  treatment: BatchDescriptiveStatistics
+  pairedDifference: BatchDescriptiveStatistics
+  effectSize: {
+    pairedCohensD?: number | null
+    cliffsDelta?: number | null
+    probabilityTreatmentBetter?: number | null
+  }
+}
+
+export interface BatchAggregate {
+  completedPairs: number
+  failedRuns: number
+  objective: {
+    metric: string
+    direction: 'increase' | 'decrease'
+    threshold: number
+    successes: number
+    evaluated: number
+    successRate: number
+    definition: string
+  }
+  objectiveSuccessRate: number
+  metrics: Record<string, BatchMetricSummary>
+}
+
+export interface ExperimentBatchRunSummary {
+  runId: string
+  repetition: number
+  seed: number
+  status: string
+}
+
+export type ExperimentBatchStatus = 'created' | 'running' | 'completed' | 'completed_with_failures' | 'failed'
+
+export interface ExperimentBatch {
+  batchId: string
+  experimentId: string
+  universeId: UniverseId
+  status: ExperimentBatchStatus
+  config?: Record<string, unknown>
+  totalRuns: number
+  completedRuns: number
+  failedRuns: number
+  runIds: string[]
+  runs: ExperimentBatchRunSummary[]
+  progress?: BatchProgress
+  aggregate?: BatchAggregate
+  objectiveSuccessRate?: number
+  createdAt: string
+  updatedAt: string
+}
+
 export interface SelectedCitizen extends Citizen {
   connections?: NetworkNode[]
   recentSignals?: string[]

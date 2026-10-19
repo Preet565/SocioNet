@@ -33,7 +33,7 @@ The trace contains execution facts and rule inputs. It does not claim to expose 
 - `interventions.py`: typed validation, immediate/delayed application, intervention history.
 - `experiments.py`: deep-copy fork from one snapshot and metric comparison.
 - `analytics.py`: event-derived metrics, claim-specific metrics, and bounded history samples.
-- `persistence.py`: additive SQLite schema migration, provenance-filtered snapshots, durable experiment runs, normalized metric/claim history, and JSON fallback.
+- `persistence.py`: additive SQLite schema migration, provenance-filtered snapshots, durable experiment runs and batches, normalized metric/claim history, and JSON fallback.
 - `presentation.py`: read-only browser projections derived from state.
 - `main.py`: request validation, locking, API routes, and compatibility endpoints.
 
@@ -48,6 +48,12 @@ Each API-created run first stores a tagged `experiment_source` snapshot, records
 Every claim-bearing origin content receives a stable `claim-{origin-content-id}` identifier. Replies, fact-checks, and counterevidence inherit the origin claim ID; branch forks therefore retain claim identity even when later content IDs diverge. A claim records its origin, source/intervention provenance, bounded content lineage, and lifecycle transitions (`active`, `disputed`, `confirmed`, or `corrected`). Old snapshots without these additive fields are accepted and hydrated when loaded.
 
 `Simulation.step()` records one `MetricSample` after the complete tick in deterministic citizen-ID order. The initial frame is sample tick 0. Each state retains at most 200 recent samples. Durable experiment branches additionally write those samples to `metric_samples` and claim rows to `claim_metric_samples`, keyed by run, branch, and tick. This makes `/analytics/history` and `/experiment-runs/{run_id}/history` restart-safe without changing the legacy comparison response.
+
+## Multi-seed batches
+
+`BatchExperimentConfig` validates the universe, catalog/custom scenario, population, tick count, repetition count, confidence level, objective metric, intervention count, and a computational budget. A batch derives one stable seed from `(base seed, one-based repetition)` using SHA-256. The same pair seed initializes the source snapshot for both control and treatment; `run_side_by_side()` then deep-copies that source before applying arm-specific interventions. Batch children are executed serially under the service lock, and the batch record is updated after every child pair with completed/failed counts and percentage progress.
+
+SQLite stores batch metadata and serialized aggregate output in `experiment_batches`. Every child remains a normal durable experiment run with `batch_id`, repetition, pair/control/treatment seed metadata, tagged source/control/treatment snapshots, and branch metric history. JSON fallback stores equivalent batch and child records in sidecars. The aggregate reports scalar metric control/treatment/paired descriptive statistics, an exact distribution-free paired-median interval, paired Cohen's d, Cliff's delta, probability treatment is better, and the pre-registered objective success rate over successful pairs.
 
 ## Metrics
 

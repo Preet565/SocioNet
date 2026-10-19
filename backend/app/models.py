@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -281,6 +281,143 @@ class ExperimentRequest(BaseModel):
     ticks: int = Field(default=3, ge=1, le=50)
     control_interventions: list[Intervention] = Field(default_factory=list)
     treatment_interventions: list[Intervention] = Field(default_factory=list)
+
+
+SUPPORTED_BATCH_METRICS = frozenset(
+    {
+        "total_contents",
+        "posts",
+        "replies",
+        "fact_checks",
+        "ignored_decisions",
+        "follows",
+        "unfollows",
+        "community_joins",
+        "community_leaves",
+        "active_agents",
+        "average_belief_confidence",
+        "average_relationship_trust",
+        "polarization",
+        "belief_accuracy",
+        "engagement_rate",
+        "exposure_rate",
+        "reshare_rate",
+        "correction_reach",
+        "community_fragmentation",
+        "time_until_claim_stops_spreading",
+    }
+)
+
+
+class BatchObjective(BaseModel):
+    """A pre-registered, explicit rule for counting paired successes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    metric: str = "correction_reach"
+    direction: Literal["increase", "decrease"] = "increase"
+    threshold: float = Field(default=0.05, ge=0)
+
+    @field_validator("metric")
+    @classmethod
+    def metric_is_supported(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized not in SUPPORTED_BATCH_METRICS:
+            raise ValueError(f"objective metric must be one of: {', '.join(sorted(SUPPORTED_BATCH_METRICS))}")
+        return normalized
+
+
+class BatchExperimentConfig(BaseModel):
+    """Bounded configuration for a synchronous, paired multi-seed batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    universe_id: Literal["prime", "echo"] = "prime"
+    experiment_id: str = Field(min_length=1, max_length=80)
+    base_seed: int | None = Field(default=None, ge=0)
+    population: int = Field(default=100, ge=1, le=500)
+    ticks: int = Field(default=6, ge=1, le=50)
+    repetitions: int = Field(default=3, ge=1, le=32)
+    computational_budget: int = Field(default=250_000, ge=2, le=2_000_000)
+    confidence_level: float = Field(default=0.95, gt=0.5, lt=1)
+    objective: BatchObjective = Field(default_factory=BatchObjective)
+    control_interventions: list[Intervention] = Field(default_factory=list, max_length=16)
+    treatment_interventions: list[Intervention] = Field(default_factory=list, max_length=16)
+
+    @field_validator("experiment_id")
+    @classmethod
+    def experiment_id_is_sanitized(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("experiment_id must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def stays_within_computational_budget(self) -> "BatchExperimentConfig":
+        # A paired run advances both arms, so each agent/tick costs two units.
+        required = 2 * self.population * self.ticks * self.repetitions
+        if required > self.computational_budget:
+            raise ValueError(
+                "population * ticks * repetitions * 2 must not exceed computational_budget "
+                f"({required} > {self.computational_budget})"
+            )
+        return self
+
+
+class BatchConfidenceInterval(BaseModel):
+    lower: float
+    upper: float
+    level: float
+    method: str
+
+
+class BatchDescriptiveStatistics(BaseModel):
+    count: int = Field(ge=0)
+    mean: float | None = None
+    median: float | None = None
+    variance: float | None = None
+    standard_deviation: float | None = None
+    confidence_interval: BatchConfidenceInterval | None = None
+
+
+class BatchEffectSizes(BaseModel):
+    paired_cohens_d: float | None = None
+    cliffs_delta: float | None = None
+    probability_treatment_better: float | None = None
+
+
+class BatchMetricSummary(BaseModel):
+    control: BatchDescriptiveStatistics
+    treatment: BatchDescriptiveStatistics
+    paired_difference: BatchDescriptiveStatistics
+    effect_size: BatchEffectSizes
+
+
+class BatchObjectiveResult(BaseModel):
+    metric: str
+    direction: Literal["increase", "decrease"]
+    threshold: float
+    successes: int = Field(ge=0)
+    evaluated: int = Field(ge=0)
+    success_rate: float = Field(ge=0, le=1)
+    definition: str
+
+
+class BatchAggregate(BaseModel):
+    completed_pairs: int = Field(ge=0)
+    failed_runs: int = Field(ge=0)
+    objective: BatchObjectiveResult
+    objective_success_rate: float = Field(ge=0, le=1)
+    metrics: dict[str, BatchMetricSummary] = Field(default_factory=dict)
+
+
+class BatchProgress(BaseModel):
+    total_runs: int = Field(ge=0)
+    completed_runs: int = Field(ge=0)
+    failed_runs: int = Field(ge=0)
+    percent_complete: float = Field(ge=0, le=100)
+    current_repetition: int | None = Field(default=None, ge=0)
+    execution_mode: Literal["serial_synchronous"] = "serial_synchronous"
 
 
 class Metrics(BaseModel):

@@ -12,6 +12,7 @@ NPC Internet is a local, deterministic civilization simulator. One hundred ficti
 - Bounded discrete ticks, delayed interventions, reproducible branch execution, and SQLite snapshot persistence.
 - Durable experiment runs with explicit source/control/treatment snapshot provenance, additive SQLite schema migration, and canonical Prime filtering.
 - Per-tick metric history with bounded durable branch samples and deterministic tick ordering.
+- Bounded serial multi-seed batches with deterministic paired seeds, durable child runs, progress metadata, descriptive statistics, distribution-free median intervals, paired effect sizes, and explicit objective success rates.
 - First-class stable claim IDs, claim lifecycle/provenance, and claim-specific exposure, reshare, reply, fact-check, and correction metrics.
 - FastAPI projections for overview, graph, citizens, feed, event stream, interventions, minds, metrics, export, and experiments.
 - Butterfly Lab catalog with the **One rumor, two universes** scenario: a false fictional civic-event claim is run against a delayed credible counterevidence branch from the same snapshot.
@@ -111,6 +112,21 @@ curl http://127.0.0.1:8000/experiment-runs/<run-id>
 curl -OJ http://127.0.0.1:8000/experiment-runs/<run-id>/export
 ```
 
+Run a bounded multi-seed batch. The API executes repetitions serially and returns the durable batch record after each paired control/treatment run has been persisted:
+
+```sh
+curl -X POST http://127.0.0.1:8000/experiment-batches \
+  -H 'content-type: application/json' \
+  -d '{"universe_id":"prime","experiment_id":"rumor-counterevidence","base_seed":9001,"population":50,"ticks":6,"repetitions":5,"computational_budget":250000,"confidence_level":0.95,"objective":{"metric":"correction_reach","direction":"increase","threshold":0.05}}'
+
+curl 'http://127.0.0.1:8000/experiment-batches?universe_id=prime'
+curl http://127.0.0.1:8000/experiment-batches/<batch-id>
+curl http://127.0.0.1:8000/experiment-batches/<batch-id>/progress
+curl http://127.0.0.1:8000/experiment-batches/<batch-id>/runs
+```
+
+`/experiments/batches` and its detail/progress/runs routes are compatibility aliases. Batch requests reject unknown catalog scenarios unless explicit interventions are supplied, enforce population/tick/repetition/budget bounds, and validate objective metrics against the scalar analytics contract.
+
 To replay from the initial seed, click the reset controls or call:
 
 ```sh
@@ -132,6 +148,7 @@ curl -X POST http://127.0.0.1:8000/reset \
 - `GET /experiments`, `POST /experiments/run`, `POST /experiments/side-by-side`
 - `POST /experiment-runs` (also `/experiments/runs`) to create a durable run; `GET` on the same collection and `/{run_id}` to list/retrieve; `/{run_id}/export` to download its JSON provenance/result record
 - `GET /experiment-runs/{run_id}/history` (also `/experiments/runs/{run_id}/history`) for persisted control/treatment time series
+- `POST /experiment-batches` (also `/experiments/batches`) for validated paired multi-seed execution; `GET` collection, `/{batch_id}`, `/{batch_id}/progress` (also `/status`), and `/{batch_id}/runs` return durable metadata, aggregate results, progress, and linked child runs
 - `POST /interventions`
 - `GET /traces`, `GET /export/json`
 - `POST /state/save`, `POST /state/load`
@@ -169,5 +186,6 @@ Open <http://127.0.0.1:8080>. If Docker Desktop is not running, use the local co
 - Canonical state loading is filtered to `provenance=canonical` and `universe_id=prime`; experiment snapshots cannot replace Prime through the existing state-load path.
 - Metric and claim history is bounded to the most recent 200 samples per state/branch; old snapshots can be hydrated with stable claim IDs but cannot reconstruct samples that were never recorded.
 - Claim exposures count recorded observations represented by action events, not passive reach; replies are also counted as claim reshares when they carry a claim ID. These are synthetic event-log measures, not measurements of real-world audiences.
-- Phase 2 records one deterministic branch pair per run. Multi-seed batches, statistical confidence, causal ancestry, and cross-run aggregation remain later phases.
+- Phase 3 batches are bounded, serial, synchronous, and in-process. Progress is durably updated after each completed pair; background queues, cancellation, and distributed execution are later concerns.
+- Batch confidence intervals are exact distribution-free intervals for the paired median, and effect sizes are computed from successful paired differences. They are robustness summaries for this fictional simulator, not inferential claims about real populations.
 - Metrics are synthetic measurements of a fictional population and must not be interpreted as evidence about real people or communities.

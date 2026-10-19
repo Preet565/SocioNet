@@ -17,11 +17,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
 from app.analytics import calculate_metrics
+from app.batch_experiments import aggregate_paired_results, derive_seed
 from app.experiments import run_side_by_side
 from app.interventions import InterventionValidationError, apply_intervention
 from app.models import (
     ExperimentRequest,
     ExperimentResult,
+    BatchExperimentConfig,
+    BatchProgress,
     Intervention,
     Metrics,
     SimulationState,
@@ -35,7 +38,7 @@ from app.persistence import (
     export_json,
 )
 from app.presentation import EXPERIMENT_CATALOG, citizen_view, frontend_state
-from app.simulation import Simulation, ensure_claim_registry
+from app.simulation import Simulation, create_initial_state, ensure_claim_registry
 
 
 class ResetRequest(BaseModel):
@@ -207,94 +210,239 @@ class SimulationService:
 
         with self.lock:
             source = self.universe(universe_id).state.model_copy(deep=True)
-            run_id = uuid4().hex
-            created_at = datetime.now(timezone.utc).isoformat()
-            source_snapshot_id = self.store.save(
+            return self._create_experiment_run_from_source(
+                source=source,
+                universe_id=universe_id,
+                experiment_id=experiment_id,
+                ticks=ticks,
+                control_interventions=control_interventions,
+                treatment_interventions=treatment_interventions,
+            )
+
+    def _create_experiment_run_from_source(
+        self,
+        *,
+        source: SimulationState,
+        universe_id: str,
+        experiment_id: str,
+        ticks: int,
+        control_interventions: list[Intervention] | None = None,
+        treatment_interventions: list[Intervention] | None = None,
+        batch_id: str | None = None,
+        repetition: int | None = None,
+        raise_on_error: bool = True,
+    ) -> dict[str, Any]:
+        """Persist one pair, optionally as a child of a multi-seed batch."""
+
+        run_id = uuid4().hex
+        created_at = datetime.now(timezone.utc).isoformat()
+        source_snapshot_id = self.store.save(
+            source,
+            provenance=EXPERIMENT_SOURCE_PROVENANCE,
+            universe_id=universe_id,
+            experiment_run_id=run_id,
+        )
+        record: dict[str, Any] = {
+            "run_id": run_id,
+            "experiment_id": experiment_id,
+            "universe_id": universe_id,
+            "status": "running",
+            "seed": source.seed,
+            "pair_seed": source.seed,
+            "control_seed": source.seed,
+            "treatment_seed": source.seed,
+            "arm_seed": source.seed,
+            "source_tick": source.tick,
+            "ticks": ticks,
+            "batch_id": batch_id,
+            "repetition": repetition,
+            "source_snapshot_id": source_snapshot_id,
+            "control_snapshot_id": None,
+            "treatment_snapshot_id": None,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "source_snapshot": self._snapshot_reference(source_snapshot_id, EXPERIMENT_SOURCE_PROVENANCE),
+        }
+        self.store.save_experiment_run(record)
+        try:
+            if control_interventions is None and treatment_interventions is None:
+                control, treatment = catalog_interventions(source, experiment_id)
+            else:
+                control = control_interventions or []
+                treatment = treatment_interventions or []
+            result = run_side_by_side(
                 source,
-                provenance=EXPERIMENT_SOURCE_PROVENANCE,
+                ticks=ticks,
+                control_interventions=control,
+                treatment_interventions=treatment,
+            )
+            control_snapshot_id = self.store.save(
+                result.control,
+                provenance=EXPERIMENT_CONTROL_PROVENANCE,
                 universe_id=universe_id,
                 experiment_run_id=run_id,
             )
+            treatment_snapshot_id = self.store.save(
+                result.treatment,
+                provenance=EXPERIMENT_TREATMENT_PROVENANCE,
+                universe_id=universe_id,
+                experiment_run_id=run_id,
+            )
+            self.store.save_metric_history(
+                result.control.metric_history,
+                scope_id=run_id,
+                branch="control",
+                universe_id=universe_id,
+                run_id=run_id,
+            )
+            self.store.save_metric_history(
+                result.treatment.metric_history,
+                scope_id=run_id,
+                branch="treatment",
+                universe_id=universe_id,
+                run_id=run_id,
+            )
+            legacy_result = experiment_result_payload(result, experiment_id, universe_id)
+            updated_at = datetime.now(timezone.utc).isoformat()
+            record.update(
+                {
+                    "status": "completed",
+                    "control_snapshot_id": control_snapshot_id,
+                    "treatment_snapshot_id": treatment_snapshot_id,
+                    "control_snapshot": self._snapshot_reference(control_snapshot_id, EXPERIMENT_CONTROL_PROVENANCE),
+                    "treatment_snapshot": self._snapshot_reference(treatment_snapshot_id, EXPERIMENT_TREATMENT_PROVENANCE),
+                    "result": legacy_result,
+                    "updated_at": updated_at,
+                }
+            )
+            self.store.save_experiment_run(record)
+            self.experiment_runs[(universe_id, experiment_id)] = result
+            return record
+        except Exception as error:
+            record.update(
+                {
+                    "status": "failed",
+                    "error": str(error),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self.store.save_experiment_run(record)
+            if raise_on_error:
+                raise
+            return record
+
+    def create_experiment_batch(self, config: BatchExperimentConfig) -> dict[str, Any]:
+        """Execute a bounded batch serially and persist progress after every pair."""
+
+        with self.lock:
+            universe = self.universe(config.universe_id)
+            base_seed = universe.state.seed if config.base_seed is None else config.base_seed
+            effective_config = config.model_copy(update={"base_seed": base_seed})
+            catalog_ids = {experiment["id"] for experiment in EXPERIMENT_CATALOG}
+            if effective_config.experiment_id not in catalog_ids and not (
+                effective_config.control_interventions or effective_config.treatment_interventions
+            ):
+                raise ValueError(f"unknown experiment_id: {effective_config.experiment_id}")
+
+            batch_id = uuid4().hex
+            created_at = datetime.now(timezone.utc).isoformat()
             record: dict[str, Any] = {
-                "run_id": run_id,
-                "experiment_id": experiment_id,
-                "universe_id": universe_id,
+                "batch_id": batch_id,
+                "experiment_id": effective_config.experiment_id,
+                "universe_id": effective_config.universe_id,
                 "status": "running",
-                "seed": source.seed,
-                "source_tick": source.tick,
-                "ticks": ticks,
-                "source_snapshot_id": source_snapshot_id,
-                "control_snapshot_id": None,
-                "treatment_snapshot_id": None,
+                "config": effective_config.model_dump(mode="json"),
+                "total_runs": effective_config.repetitions,
+                "completed_runs": 0,
+                "failed_runs": 0,
+                "run_ids": [],
+                "runs": [],
+                "progress": BatchProgress(
+                    total_runs=effective_config.repetitions,
+                    completed_runs=0,
+                    failed_runs=0,
+                    percent_complete=0.0,
+                    current_repetition=0,
+                ).model_dump(mode="json"),
                 "created_at": created_at,
                 "updated_at": created_at,
-                "source_snapshot": self._snapshot_reference(source_snapshot_id, EXPERIMENT_SOURCE_PROVENANCE),
             }
-            self.store.save_experiment_run(record)
-            try:
-                if control_interventions is None and treatment_interventions is None:
-                    control, treatment = catalog_interventions(source, experiment_id)
+            self.store.save_experiment_batch(record)
+            successful_results: list[ExperimentResult] = []
+            failed_pairs = 0
+
+            for repetition in range(1, effective_config.repetitions + 1):
+                seed = derive_seed(base_seed, repetition)
+                source = create_initial_state(seed, count=effective_config.population)
+                child = self._create_experiment_run_from_source(
+                    source=source,
+                    universe_id=effective_config.universe_id,
+                    experiment_id=effective_config.experiment_id,
+                    ticks=effective_config.ticks,
+                    control_interventions=(
+                        None
+                        if not effective_config.control_interventions and not effective_config.treatment_interventions
+                        else effective_config.control_interventions
+                    ),
+                    treatment_interventions=(
+                        None
+                        if not effective_config.control_interventions and not effective_config.treatment_interventions
+                        else effective_config.treatment_interventions
+                    ),
+                    batch_id=batch_id,
+                    repetition=repetition,
+                    raise_on_error=False,
+                )
+                record["run_ids"].append(child["run_id"])
+                record["runs"].append(
+                    {
+                        "run_id": child["run_id"],
+                        "repetition": repetition,
+                        "seed": seed,
+                        "status": child["status"],
+                    }
+                )
+                if child["status"] == "completed":
+                    successful_results.append(ExperimentResult.model_validate(child["result"]))
+                    record["completed_runs"] += 1
                 else:
-                    control = control_interventions or []
-                    treatment = treatment_interventions or []
-                result = run_side_by_side(
-                    source,
-                    ticks=ticks,
-                    control_interventions=control,
-                    treatment_interventions=treatment,
-                )
-                control_snapshot_id = self.store.save(
-                    result.control,
-                    provenance=EXPERIMENT_CONTROL_PROVENANCE,
-                    universe_id=universe_id,
-                    experiment_run_id=run_id,
-                )
-                treatment_snapshot_id = self.store.save(
-                    result.treatment,
-                    provenance=EXPERIMENT_TREATMENT_PROVENANCE,
-                    universe_id=universe_id,
-                    experiment_run_id=run_id,
-                )
-                self.store.save_metric_history(
-                    result.control.metric_history,
-                    scope_id=run_id,
-                    branch="control",
-                    universe_id=universe_id,
-                    run_id=run_id,
-                )
-                self.store.save_metric_history(
-                    result.treatment.metric_history,
-                    scope_id=run_id,
-                    branch="treatment",
-                    universe_id=universe_id,
-                    run_id=run_id,
-                )
-                legacy_result = experiment_result_payload(result, experiment_id, universe_id)
-                updated_at = datetime.now(timezone.utc).isoformat()
-                record.update(
-                    {
-                        "status": "completed",
-                        "control_snapshot_id": control_snapshot_id,
-                        "treatment_snapshot_id": treatment_snapshot_id,
-                        "control_snapshot": self._snapshot_reference(control_snapshot_id, EXPERIMENT_CONTROL_PROVENANCE),
-                        "treatment_snapshot": self._snapshot_reference(treatment_snapshot_id, EXPERIMENT_TREATMENT_PROVENANCE),
-                        "result": legacy_result,
-                        "updated_at": updated_at,
-                    }
-                )
-                self.store.save_experiment_run(record)
-                self.experiment_runs[(universe_id, experiment_id)] = result
-                return record
-            except Exception as error:
-                record.update(
-                    {
-                        "status": "failed",
-                        "error": str(error),
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
-                self.store.save_experiment_run(record)
-                raise
+                    failed_pairs += 1
+                    record["failed_runs"] += 1
+                record["progress"] = BatchProgress(
+                    total_runs=effective_config.repetitions,
+                    completed_runs=record["completed_runs"],
+                    failed_runs=record["failed_runs"],
+                    percent_complete=((repetition / effective_config.repetitions) * 100),
+                    current_repetition=repetition,
+                ).model_dump(mode="json")
+                record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                self.store.save_experiment_batch(record)
+
+            aggregate = aggregate_paired_results(
+                successful_results,
+                objective=effective_config.objective,
+                confidence_level=effective_config.confidence_level,
+                failed_runs=failed_pairs,
+            )
+            record["aggregate"] = aggregate.model_dump(mode="json")
+            record["objective_success_rate"] = aggregate.objective_success_rate
+            record["progress"] = BatchProgress(
+                total_runs=effective_config.repetitions,
+                completed_runs=record["completed_runs"],
+                failed_runs=record["failed_runs"],
+                percent_complete=100.0,
+                current_repetition=effective_config.repetitions,
+            ).model_dump(mode="json")
+            record["status"] = (
+                "completed"
+                if record["failed_runs"] == 0
+                else "completed_with_failures"
+                if record["completed_runs"] > 0
+                else "failed"
+            )
+            record["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.store.save_experiment_batch(record)
+            return record
 
     def _snapshot_reference(self, snapshot_id: int, provenance: str) -> dict[str, Any]:
         metadata = self.store.snapshot_metadata(snapshot_id, provenance=provenance)
@@ -747,6 +895,66 @@ def list_experiment_runs(
     if status is not None:
         runs = [run for run in runs if run.get("status") == status]
     return {"runs": runs}
+
+
+@app.post("/experiment-batches")
+@app.post("/experiments/batches")
+def create_experiment_batch(payload: BatchExperimentConfig, request: Request) -> dict[str, Any]:
+    try:
+        return get_service(request).create_experiment_batch(payload)
+    except (InterventionValidationError, ValidationError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.get("/experiment-batches")
+@app.get("/experiments/batches")
+def list_experiment_batches(
+    request: Request,
+    universe_id: Literal["prime", "echo"] | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> dict[str, Any]:
+    batches = get_service(request).store.list_experiment_batches(universe_id)
+    if status is not None:
+        batches = [batch for batch in batches if batch.get("status") == status]
+    return {"batches": batches}
+
+
+def _get_experiment_batch_or_404(request: Request, batch_id: str) -> dict[str, Any]:
+    batch = get_service(request).store.get_experiment_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"unknown experiment batch: {batch_id}")
+    return batch
+
+
+@app.get("/experiment-batches/{batch_id}/status")
+@app.get("/experiments/batches/{batch_id}/status")
+@app.get("/experiment-batches/{batch_id}/progress")
+@app.get("/experiments/batches/{batch_id}/progress")
+def experiment_batch_status(batch_id: str, request: Request) -> dict[str, Any]:
+    batch = _get_experiment_batch_or_404(request, batch_id)
+    return {
+        "batch_id": batch["batch_id"],
+        "status": batch["status"],
+        "progress": batch.get("progress"),
+        "completed_runs": batch.get("completed_runs", 0),
+        "failed_runs": batch.get("failed_runs", 0),
+        "total_runs": batch.get("total_runs", 0),
+        "execution_mode": "serial_synchronous",
+    }
+
+
+@app.get("/experiment-batches/{batch_id}/runs")
+@app.get("/experiments/batches/{batch_id}/runs")
+def experiment_batch_runs(batch_id: str, request: Request) -> dict[str, Any]:
+    batch = _get_experiment_batch_or_404(request, batch_id)
+    runs = [run for run in get_service(request).store.list_experiment_runs(batch.get("universe_id")) if run.get("batch_id") == batch_id]
+    return {"batch_id": batch_id, "runs": runs}
+
+
+@app.get("/experiment-batches/{batch_id}")
+@app.get("/experiments/batches/{batch_id}")
+def get_experiment_batch(batch_id: str, request: Request) -> dict[str, Any]:
+    return _get_experiment_batch_or_404(request, batch_id)
 
 
 @app.get("/experiment-runs/{run_id}/export")

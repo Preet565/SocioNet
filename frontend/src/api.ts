@@ -1,9 +1,15 @@
 import type {
   AgentMind,
+  BatchAggregate,
+  BatchDescriptiveStatistics,
+  BatchMetricSummary,
+  BatchProgress,
   Citizen,
   Experiment,
   ExperimentComparison,
   ExperimentHistory,
+  ExperimentBatch,
+  BatchExperimentConfigInput,
   ExperimentRun,
   ExperimentMetricSnapshot,
   ClaimRecord,
@@ -306,6 +312,104 @@ const normalizeExperimentRun = (value: unknown): ExperimentRun => {
   }
 }
 
+const normalizeBatchStatistics = (value: unknown): BatchDescriptiveStatistics => {
+  const record = asRecord(value) ?? {}
+  const interval = asRecord(pick(record, ['confidence_interval', 'confidenceInterval']))
+  return {
+    count: numberOr(pick(record, ['count']), 0),
+    mean: typeof pick(record, ['mean']) === 'number' ? pick(record, ['mean']) as number : null,
+    median: typeof pick(record, ['median']) === 'number' ? pick(record, ['median']) as number : null,
+    variance: typeof pick(record, ['variance']) === 'number' ? pick(record, ['variance']) as number : null,
+    standardDeviation: typeof pick(record, ['standard_deviation', 'standardDeviation']) === 'number' ? pick(record, ['standard_deviation', 'standardDeviation']) as number : null,
+    confidenceInterval: interval ? {
+      lower: numberOr(pick(interval, ['lower']), 0),
+      upper: numberOr(pick(interval, ['upper']), 0),
+      level: numberOr(pick(interval, ['level']), 0.95),
+      method: stringOr(pick(interval, ['method']), 'distribution-free interval'),
+    } : null,
+  }
+}
+
+const normalizeBatchMetric = (value: unknown): BatchMetricSummary => {
+  const record = asRecord(value) ?? {}
+  const effect = asRecord(pick(record, ['effect_size', 'effectSize'])) ?? {}
+  return {
+    control: normalizeBatchStatistics(pick(record, ['control'])),
+    treatment: normalizeBatchStatistics(pick(record, ['treatment'])),
+    pairedDifference: normalizeBatchStatistics(pick(record, ['paired_difference', 'pairedDifference'])),
+    effectSize: {
+      pairedCohensD: typeof pick(effect, ['paired_cohens_d', 'pairedCohensD']) === 'number' ? pick(effect, ['paired_cohens_d', 'pairedCohensD']) as number : null,
+      cliffsDelta: typeof pick(effect, ['cliffs_delta', 'cliffsDelta']) === 'number' ? pick(effect, ['cliffs_delta', 'cliffsDelta']) as number : null,
+      probabilityTreatmentBetter: typeof pick(effect, ['probability_treatment_better', 'probabilityTreatmentBetter']) === 'number' ? pick(effect, ['probability_treatment_better', 'probabilityTreatmentBetter']) as number : null,
+    },
+  }
+}
+
+const normalizeBatchAggregate = (value: unknown): BatchAggregate | undefined => {
+  const record = asRecord(value)
+  if (!record) return undefined
+  const objectiveRecord = asRecord(pick(record, ['objective'])) ?? {}
+  const rawMetrics = asRecord(pick(record, ['metrics'])) ?? {}
+  return {
+    completedPairs: numberOr(pick(record, ['completed_pairs', 'completedPairs']), 0),
+    failedRuns: numberOr(pick(record, ['failed_runs', 'failedRuns']), 0),
+    objective: {
+      metric: stringOr(pick(objectiveRecord, ['metric']), 'correction_reach'),
+      direction: pick(objectiveRecord, ['direction']) === 'decrease' ? 'decrease' : 'increase',
+      threshold: numberOr(pick(objectiveRecord, ['threshold']), 0),
+      successes: numberOr(pick(objectiveRecord, ['successes']), 0),
+      evaluated: numberOr(pick(objectiveRecord, ['evaluated']), 0),
+      successRate: numberOr(pick(objectiveRecord, ['success_rate', 'successRate']), 0),
+      definition: stringOr(pick(objectiveRecord, ['definition']), 'Paired objective difference'),
+    },
+    objectiveSuccessRate: numberOr(pick(record, ['objective_success_rate', 'objectiveSuccessRate']), 0),
+    metrics: Object.fromEntries(Object.entries(rawMetrics).map(([metric, summary]) => [metric, normalizeBatchMetric(summary)])),
+  }
+}
+
+const normalizeBatchProgress = (value: unknown): BatchProgress | undefined => {
+  const record = asRecord(value)
+  if (!record) return undefined
+  return {
+    totalRuns: numberOr(pick(record, ['total_runs', 'totalRuns']), 0),
+    completedRuns: numberOr(pick(record, ['completed_runs', 'completedRuns']), 0),
+    failedRuns: numberOr(pick(record, ['failed_runs', 'failedRuns']), 0),
+    percentComplete: numberOr(pick(record, ['percent_complete', 'percentComplete']), 0),
+    currentRepetition: typeof pick(record, ['current_repetition', 'currentRepetition']) === 'number' ? pick(record, ['current_repetition', 'currentRepetition']) as number : undefined,
+    executionMode: 'serial_synchronous',
+  }
+}
+
+const normalizeBatch = (value: unknown): ExperimentBatch => {
+  const record = asRecord(value) ?? {}
+  const rawRuns = arrayOr(pick(record, ['runs'])).map((value) => {
+    const run = asRecord(value) ?? {}
+    return {
+      runId: stringOr(pick(run, ['run_id', 'runId']), 'unknown-run'),
+      repetition: numberOr(pick(run, ['repetition']), 0),
+      seed: numberOr(pick(run, ['seed']), 0),
+      status: stringOr(pick(run, ['status']), 'unknown'),
+    }
+  })
+  return {
+    batchId: stringOr(pick(record, ['batch_id', 'batchId']), 'unknown-batch'),
+    experimentId: stringOr(pick(record, ['experiment_id', 'experimentId']), 'experiment'),
+    universeId: stringOr(pick(record, ['universe_id', 'universeId']), 'prime') as UniverseId,
+    status: stringOr(pick(record, ['status']), 'created') as ExperimentBatch['status'],
+    config: asRecord(pick(record, ['config'])),
+    totalRuns: numberOr(pick(record, ['total_runs', 'totalRuns']), 0),
+    completedRuns: numberOr(pick(record, ['completed_runs', 'completedRuns']), 0),
+    failedRuns: numberOr(pick(record, ['failed_runs', 'failedRuns']), 0),
+    runIds: arrayOr(pick(record, ['run_ids', 'runIds'])).map((runId) => String(runId)),
+    runs: rawRuns,
+    progress: normalizeBatchProgress(pick(record, ['progress'])),
+    aggregate: normalizeBatchAggregate(pick(record, ['aggregate'])),
+    objectiveSuccessRate: typeof pick(record, ['objective_success_rate', 'objectiveSuccessRate']) === 'number' ? pick(record, ['objective_success_rate', 'objectiveSuccessRate']) as number : undefined,
+    createdAt: stringOr(pick(record, ['created_at', 'createdAt']), new Date().toISOString()),
+    updatedAt: stringOr(pick(record, ['updated_at', 'updatedAt']), new Date().toISOString()),
+  }
+}
+
 const normalizeIntervention = (value: unknown, index: number): InterventionRecord => {
   const record = asRecord(value)
   const state = stringOr(pick(record, ['state', 'status']), 'queued')
@@ -438,6 +542,36 @@ export const api = {
     return arrayOr(root.runs ?? payload).map(normalizeExperimentRun)
   },
   getExperimentRun: async (runId: string) => normalizeExperimentRun(await request<unknown>(`/experiment-runs/${encodeURIComponent(runId)}`)),
+  createExperimentBatch: async (config: BatchExperimentConfigInput) => normalizeBatch(await request<unknown>('/experiment-batches', {
+    method: 'POST',
+    body: JSON.stringify({
+      universe_id: config.universeId,
+      experiment_id: config.experimentId,
+      base_seed: config.baseSeed,
+      population: config.population,
+      ticks: config.ticks,
+      repetitions: config.repetitions,
+      computational_budget: config.computationalBudget,
+      confidence_level: config.confidenceLevel,
+      objective: config.objective,
+    }),
+  })),
+  getExperimentBatches: async (universeId?: UniverseId) => {
+    const query = universeId ? `?universe_id=${encodeUniverse(universeId)}` : ''
+    const payload = await request<unknown>(`/experiment-batches${query}`)
+    const root = unwrap(payload)
+    return arrayOr(root.batches ?? payload).map(normalizeBatch)
+  },
+  getExperimentBatch: async (batchId: string) => normalizeBatch(await request<unknown>(`/experiment-batches/${encodeURIComponent(batchId)}`)),
+  getExperimentBatchProgress: async (batchId: string) => {
+    const payload = await request<unknown>(`/experiment-batches/${encodeURIComponent(batchId)}/progress`)
+    const record = asRecord(payload) ?? {}
+    return {
+      batchId: stringOr(pick(record, ['batch_id', 'batchId']), batchId),
+      status: stringOr(pick(record, ['status']), 'created'),
+      progress: normalizeBatchProgress(pick(record, ['progress'])),
+    }
+  },
   getExperimentHistory: async (runId: string, options: { branch?: 'control' | 'treatment'; fromTick?: number; toTick?: number; limit?: number } = {}) => {
     const params = new URLSearchParams()
     if (options.branch) params.set('branch', options.branch)

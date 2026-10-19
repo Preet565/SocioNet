@@ -35,6 +35,8 @@ Useful endpoints:
 - `GET /experiment-runs/{run_id}` — retrieve a complete run record, including its result and tagged snapshots.
 - `GET /experiment-runs/{run_id}/export` — download the run record as JSON.
 - `GET /experiment-runs/{run_id}/history` — persisted control/treatment metric samples with tick-range filters.
+- `POST /experiment-batches` (or `/experiments/batches`) — validate and execute a bounded serial multi-seed batch.
+- `GET /experiment-batches`, `GET /experiment-batches/{batch_id}`, `GET /experiment-batches/{batch_id}/progress`, and `GET /experiment-batches/{batch_id}/runs` — list, inspect, monitor, and retrieve linked child runs; `/experiments/batches` aliases are also supported.
 - `GET /analytics` — calculated engagement, belief, relationship, polarization, and topic metrics.
 - `GET /analytics/history` — current-universe or durable-run per-tick history with branch and tick filters.
 - `GET /analytics/claims` and `GET /analytics/claims/{claim_id}` — claim lifecycle/provenance and exposure, reshare, reply, fact-check, and correction analytics.
@@ -57,7 +59,7 @@ cd backend
 make test
 ```
 
-The suite covers the 100-citizen seed, lifecycle transitions, beliefs, memories, relationships, invalid interventions, delayed counterevidence, reproducibility, analytics, experiments, persistence, additive SQLite migration and old snapshots, deterministic history, claim lifecycle/provenance, filtered history APIs, durable run retrieval/export, and experiment history after restart.
+The suite covers the 100-citizen seed, lifecycle transitions, beliefs, memories, relationships, invalid interventions, delayed counterevidence, reproducibility, analytics, experiments, persistence, additive SQLite migration and old snapshots, deterministic history, claim lifecycle/provenance, filtered history APIs, durable run retrieval/export, experiment history after restart, and Phase 3 batch validation, paired seeds, summaries, persistence, route aliases, and restart retrieval.
 
 ## Docker deploy
 

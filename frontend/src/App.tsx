@@ -4,6 +4,7 @@ import { buildFallbackState, getFallbackCitizen } from './data'
 import { Icon, type IconName } from './icons'
 import type {
   Citizen,
+  ExperimentBatch,
   Experiment,
   ExperimentComparison,
   ExperimentHistory,
@@ -237,15 +238,16 @@ function HygieneRow({ index, title, text }: { index: string; title: string; text
   return <div className="hygiene-row"><span>{index}</span><div><strong>{title}</strong><p>{text}</p></div></div>
 }
 
-function ButterflyLabView({ state, otherState, comparison, history, experimentHistory, runningId, onRun }: { state: UniverseState; otherState: UniverseState; comparison?: ExperimentComparison; history: ExperimentRun[]; experimentHistory?: ExperimentHistory; runningId?: string; onRun: (experiment: Experiment) => void }) {
+function ButterflyLabView({ state, otherState, comparison, history, experimentHistory, batches, runningId, batchRunningId, onRun, onRunBatch }: { state: UniverseState; otherState: UniverseState; comparison?: ExperimentComparison; history: ExperimentRun[]; experimentHistory?: ExperimentHistory; batches: ExperimentBatch[]; runningId?: string; batchRunningId?: string; onRun: (experiment: Experiment) => void; onRunBatch: (experiment: Experiment) => void }) {
   return <>
     <SectionHeader eyebrow="Counterfactuals / controlled change" title="Butterfly Lab" description="Run the same question against the current universe and record what moves." action={<StatusPill tone="violet"><Icon name="flask" size={13} /> reproducible experiments</StatusPill>} />
     <section className="panel lab-intro"><div className="lab-intro__mark"><Icon name="spark" size={23} /></div><div><span className="eyebrow">Method note</span><h3>A good experiment changes one thing you can name.</h3><p>Every run is attached to a universe, a tick, and an explicit set of variables. Use the two-universe demo to establish a shared starting frame before comparing outcomes.</p></div><div className="lab-intro__tick"><span>Selected tick</span><strong>{formatNumber(state.tick)}</strong></div></section>
     <section className="lab-compare" aria-label="Side-by-side universe comparison"><UniverseCompareCard label="Prime / control" tone="violet" state={state} /><div className="compare-divider"><span>Δ</span><small>branch</small></div><UniverseCompareCard label="Echo / counterfactual" tone="teal" state={otherState} /></section>
      {comparison && <ComparisonResult comparison={comparison} />}
      {experimentHistory && <HistoryComparisonChart history={experimentHistory} />}
-    <div className="experiment-grid">{state.experiments.length ? state.experiments.map((experiment) => <ExperimentCard key={experiment.id} experiment={experiment} running={runningId === experiment.id} onRun={() => onRun(experiment)} />) : <EmptyState title="No experiments registered" body="The API returned no scenarios for this universe." />}</div>
-     <section className="panel experiment-history"><PanelHeader title="Durable run history" subtitle="Every completed run keeps its source and branch snapshot provenance." action={<StatusPill tone="neutral">{history.length} saved</StatusPill>} />{history.length ? <div className="run-history-list">{history.slice(0, 8).map((run) => <article className="run-history-row" key={run.runId}><div className="run-history-row__main"><StatusPill tone={run.status === 'completed' ? 'green' : run.status === 'failed' ? 'red' : 'amber'}>{run.status}</StatusPill><div><strong>{run.experimentId.replaceAll('-', ' ')}</strong><span>run {run.runId.slice(0, 10)} · {formatDateTime(run.updatedAt)}</span></div></div><div className="run-history-row__provenance"><span>Source {run.sourceSnapshot ? `#${run.sourceSnapshot.snapshotId} · tick ${run.sourceSnapshot.tick}` : 'unavailable'}</span><span>Branches {run.controlSnapshot ? `#${run.controlSnapshot.snapshotId}` : '—'} / {run.treatmentSnapshot ? `#${run.treatmentSnapshot.snapshotId}` : '—'}</span></div><a className="text-button" href={api.experimentRunExportUrl(run.runId)} target="_blank" rel="noreferrer">Export <Icon name="arrow" size={13} /></a></article>)}</div> : <EmptyState title="No durable runs yet" body="Run a catalog experiment to create a history entry with source, control, and treatment snapshot tags." />}</section>
+     <div className="experiment-grid">{state.experiments.length ? state.experiments.map((experiment) => <ExperimentCard key={experiment.id} experiment={experiment} running={runningId === experiment.id} batchRunning={batchRunningId === experiment.id} onRun={() => onRun(experiment)} onBatch={() => onRunBatch(experiment)} />) : <EmptyState title="No experiments registered" body="The API returned no scenarios for this universe." />}</div>
+      <BatchHistory batches={batches} />
+      <section className="panel experiment-history"><PanelHeader title="Durable run history" subtitle="Every completed run keeps its source and branch snapshot provenance." action={<StatusPill tone="neutral">{history.length} saved</StatusPill>} />{history.length ? <div className="run-history-list">{history.slice(0, 8).map((run) => <article className="run-history-row" key={run.runId}><div className="run-history-row__main"><StatusPill tone={run.status === 'completed' ? 'green' : run.status === 'failed' ? 'red' : 'amber'}>{run.status}</StatusPill><div><strong>{run.experimentId.replaceAll('-', ' ')}</strong><span>run {run.runId.slice(0, 10)} · {formatDateTime(run.updatedAt)}</span></div></div><div className="run-history-row__provenance"><span>Source {run.sourceSnapshot ? `#${run.sourceSnapshot.snapshotId} · tick ${run.sourceSnapshot.tick}` : 'unavailable'}</span><span>Branches {run.controlSnapshot ? `#${run.controlSnapshot.snapshotId}` : '—'} / {run.treatmentSnapshot ? `#${run.treatmentSnapshot.snapshotId}` : '—'}</span></div><a className="text-button" href={api.experimentRunExportUrl(run.runId)} target="_blank" rel="noreferrer">Export <Icon name="arrow" size={13} /></a></article>)}</div> : <EmptyState title="No durable runs yet" body="Run a catalog experiment to create a history entry with source, control, and treatment snapshot tags." />}</section>
      <section className="panel experiment-history"><PanelHeader title="Run protocol" subtitle="The backend owns the run record and branch snapshots." /><div className="protocol-grid"><ProtocolStep index="01" title="Name the variable" text="Pick one factor to change." /><ProtocolStep index="02" title="Run the sequence" text="The backend records a tagged source and two branches." /><ProtocolStep index="03" title="Read the wake" text="Retrieve, export, and compare the durable result." /></div></section>
   </>
 }
@@ -308,8 +310,17 @@ function HistoryComparisonChart({ history }: { history: ExperimentHistory }) {
   </section>
 }
 
-function ExperimentCard({ experiment, running, onRun }: { experiment: Experiment; running: boolean; onRun: () => void }) {
-  return <article className="experiment-card"><div className="experiment-card__top"><StatusPill tone={experiment.status === 'complete' ? 'green' : experiment.status === 'paused' ? 'amber' : 'violet'}>{running ? 'running' : experiment.status}</StatusPill><span className="experiment-code">{experiment.id}</span></div><h3>{experiment.name}</h3><p>{experiment.description}</p><div className="tag-list">{experiment.variables.map((variable) => <span className="tag" key={variable}>{variable}</span>)}</div><div className="experiment-card__bottom"><div><span>Projected readout</span><strong>{experiment.projectedImpact}</strong>{experiment.lastRun && <small>Last run {experiment.lastRun}</small>}</div><button className="button small primary" onClick={onRun} disabled={running}><Icon name={running ? 'pause' : 'play'} size={13} />{running ? 'Running' : 'Run experiment'}</button></div></article>
+function BatchHistory({ batches }: { batches: ExperimentBatch[] }) {
+  return <section className="panel batch-history"><PanelHeader title="Multi-seed robustness" subtitle="Paired seeds run serially within a bounded computational budget" action={<StatusPill tone="green">{batches.length} saved</StatusPill>} />{batches.length ? <div className="batch-list">{batches.slice(0, 6).map((batch) => {
+    const statusTone = batch.status === 'completed' ? 'green' : batch.status === 'failed' ? 'red' : batch.status === 'completed_with_failures' ? 'amber' : 'violet'
+    const objective = batch.aggregate?.objective
+    const summary = objective ? batch.aggregate?.metrics[objective.metric] : undefined
+    return <article className="batch-row" key={batch.batchId}><div className="batch-row__main"><StatusPill tone={statusTone}>{batch.status.replaceAll('_', ' ')}</StatusPill><div><strong>{batch.experimentId.replaceAll('-', ' ')}</strong><span>{batch.completedRuns}/{batch.totalRuns} pairs · base seed {String(batch.config?.base_seed ?? 'unavailable')}</span></div></div><div className="batch-row__progress"><div><span>Progress</span><strong>{Math.round(batch.progress?.percentComplete ?? 0)}%</strong></div><ProgressBar value={(batch.progress?.percentComplete ?? 0) / 100} tone="teal" /><small>{batch.progress?.executionMode === 'serial_synchronous' ? 'serial / synchronous' : 'bounded execution'}</small></div><div className="batch-row__result">{objective ? <><span>{objective.metric.replaceAll('_', ' ')} success</span><strong>{formatPercent(batch.aggregate?.objectiveSuccessRate ?? 0)}</strong><small>{objective.successes}/{objective.evaluated} pairs · Δ mean {summary?.pairedDifference.mean?.toFixed(3) ?? '—'}</small></> : <span>Aggregate pending</span>}</div></article>
+  })}</div> : <EmptyState title="No multi-seed batches yet" body="Use Run 5-seed batch on a catalog scenario to measure the paired result across deterministic seeds." />}</section>
+}
+
+function ExperimentCard({ experiment, running, batchRunning, onRun, onBatch }: { experiment: Experiment; running: boolean; batchRunning: boolean; onRun: () => void; onBatch: () => void }) {
+  return <article className="experiment-card"><div className="experiment-card__top"><StatusPill tone={experiment.status === 'complete' ? 'green' : experiment.status === 'paused' ? 'amber' : 'violet'}>{running || batchRunning ? 'running' : experiment.status}</StatusPill><span className="experiment-code">{experiment.id}</span></div><h3>{experiment.name}</h3><p>{experiment.description}</p><div className="tag-list">{experiment.variables.map((variable) => <span className="tag" key={variable}>{variable}</span>)}</div><div className="experiment-card__bottom"><div><span>Projected readout</span><strong>{experiment.projectedImpact}</strong>{experiment.lastRun && <small>Last run {experiment.lastRun}</small>}</div><div className="experiment-card__actions"><button className="button small primary" onClick={onRun} disabled={running || batchRunning}><Icon name={running ? 'pause' : 'play'} size={13} />{running ? 'Running' : 'Run experiment'}</button><button className="text-button" onClick={onBatch} disabled={running || batchRunning}><Icon name="activity" size={13} />{batchRunning ? 'Batch running' : 'Run 5-seed batch'}</button></div></div></article>
 }
 
 function ProtocolStep({ index, title, text }: { index: string; title: string; text: string }) {
@@ -365,6 +376,7 @@ export default function App() {
   const [comparison, setComparison] = useState<ExperimentComparison>()
   const [experimentHistory, setExperimentHistory] = useState<ExperimentHistory>()
   const [experimentRuns, setExperimentRuns] = useState<ExperimentRun[]>([])
+  const [experimentBatches, setExperimentBatches] = useState<ExperimentBatch[]>([])
   const [toast, setToast] = useState<Toast>(null)
   const [error, setError] = useState<string | null>(null)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -385,6 +397,7 @@ export default function App() {
   const enterOfflinePreview = useCallback((message = 'Simulation API is unreachable. Showing deterministic offline preview data.') => {
     setOffline(true)
     setExperimentRuns([])
+    setExperimentBatches([])
     setExperimentHistory(undefined)
     setStateByUniverse({ prime: buildFallbackState('prime'), echo: buildFallbackState('echo') })
     showToast({ tone: 'warning', message })
@@ -393,10 +406,13 @@ export default function App() {
   const loadExperimentHistory = useCallback(async (universeId: UniverseId) => {
     if (offline) {
       setExperimentRuns([])
+      setExperimentBatches([])
       return
     }
     try {
-      setExperimentRuns(await api.getExperimentRuns(universeId))
+      const [runs, batches] = await Promise.all([api.getExperimentRuns(universeId), api.getExperimentBatches(universeId)])
+      setExperimentRuns(runs)
+      setExperimentBatches(batches)
     } catch (requestError) {
       if (isUnavailable(requestError)) enterOfflinePreview()
       else setError(requestError instanceof Error ? requestError.message : 'Could not load experiment history.')
@@ -573,6 +589,33 @@ export default function App() {
     }
   }
 
+  const runBatch = async (experiment: Experiment) => {
+    setBusyAction(`batch-${experiment.id}`)
+    try {
+      if (offline) {
+        showToast({ tone: 'warning', message: 'Batch preview is unavailable offline; no live aggregate was recorded.' })
+      } else {
+        const batch = await api.createExperimentBatch({
+          universeId: activeUniverse,
+          experimentId: experiment.id,
+          population: Math.max(1, Math.min(stateByUniverse[activeUniverse]?.metrics.population ?? 100, 100)),
+          ticks: 6,
+          repetitions: 5,
+          computationalBudget: 250000,
+          confidenceLevel: 0.95,
+          objective: { metric: 'correction_reach', direction: 'increase', threshold: 0.05 },
+        })
+        setExperimentBatches((current) => [batch, ...current.filter((item) => item.batchId !== batch.batchId)])
+        showToast({ tone: 'success', message: `${experiment.name}: ${batch.completedRuns}/${batch.totalRuns} paired runs aggregated.` })
+      }
+    } catch (requestError) {
+      if (isUnavailable(requestError)) enterOfflinePreview()
+      else setError(requestError instanceof Error ? requestError.message : 'Batch experiment failed.')
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
   const applyIntervention = async (input: { action: string; target: string; intensity: number; rationale: string }) => {
     setBusyAction('intervention')
     try {
@@ -618,7 +661,7 @@ export default function App() {
       case 'social': return <SocialUniverseView state={state} />
       case 'citizens': return <CitizenObservatoryView state={state} selected={selectedCitizen} onSelect={(citizen) => void selectCitizen(citizen)} onNavigate={setActiveView} />
       case 'information': return <InformationEcosystemView state={state} />
-       case 'lab': return <ButterflyLabView state={state} otherState={otherState} comparison={comparison} history={experimentRuns} experimentHistory={experimentHistory} runningId={busyAction?.startsWith('experiment-') ? busyAction.replace('experiment-', '') : undefined} onRun={(experiment) => void runExperiment(experiment)} />
+       case 'lab': return <ButterflyLabView state={state} otherState={otherState} comparison={comparison} history={experimentRuns} experimentHistory={experimentHistory} batches={experimentBatches} runningId={busyAction?.startsWith('experiment-') ? busyAction.replace('experiment-', '') : undefined} batchRunningId={busyAction?.startsWith('batch-') ? busyAction.replace('batch-', '') : undefined} onRun={(experiment) => void runExperiment(experiment)} onRunBatch={(experiment) => void runBatch(experiment)} />
       case 'interventions': return <InterventionConsoleView state={state} submitting={busyAction === 'intervention'} onSubmit={(input) => void applyIntervention(input)} />
       case 'mind': return <AgentMindView state={state} />
     }
