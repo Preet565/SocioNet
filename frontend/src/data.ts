@@ -89,7 +89,7 @@ export const buildFallbackState = (universeId: UniverseId): UniverseState => {
   const previewEdges = previewNodes.slice(0, 99).map((node, index) => ({ source: node.id, target: previewNodes[index + 1].id, weight: 0.2 + (index % 7) / 10, relation: 'preview tie' }))
   return {
   universeId,
-  label: universeId === 'prime' ? 'Prime / baseline' : 'Echo / alternate',
+   label: universeId === 'prime' ? 'Prime / offline sample' : 'Echo / offline sample',
   phase: universeId === 'prime' ? 'Signal propagation' : 'Trust recalibration',
   tick: 0,
   updatedAt: '2026-02-18T14:32:00.000Z',
@@ -98,8 +98,8 @@ export const buildFallbackState = (universeId: UniverseId): UniverseState => {
   edges: previewEdges,
   citizens: previewCitizens.map((citizen) => ({ ...citizen, beliefs: [...citizen.beliefs] })),
   sources: sources.map((source) => ({ ...source })),
-  experiments: experiments.map((experiment) => ({ ...experiment, variables: [...experiment.variables] })),
-  interventions: interventions.map((intervention) => ({ ...intervention })),
+   experiments: experiments.map((experiment) => ({ ...experiment, status: 'ready', lastRun: undefined, variables: [...experiment.variables] })),
+   interventions: interventions.map((intervention) => ({ ...intervention, state: 'queued', timestamp: 'preview sample', effect: 'Illustrative offline sample; not recorded.' })),
   minds: minds.map((mind) => ({ ...mind, memory: [...mind.memory], activeDrivers: [...mind.activeDrivers] })),
   }
 }

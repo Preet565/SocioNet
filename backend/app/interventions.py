@@ -26,6 +26,12 @@ class InterventionValidationError(ValueError):
 
 
 def validate_intervention(state: SimulationState, intervention: Intervention) -> None:
+    if intervention.claim_id is not None:
+        claim = state.claims.get(intervention.claim_id)
+        if claim is None:
+            raise InterventionValidationError(f"unknown claim_id: {intervention.claim_id}")
+        if intervention.topic != claim.topic:
+            raise InterventionValidationError("counterevidence topic must match claim_id")
     if intervention.agent_id and intervention.agent_id not in state.agents:
         raise InterventionValidationError(f"unknown agent_id: {intervention.agent_id}")
     if intervention.target_agent_id and intervention.target_agent_id not in state.agents:
@@ -73,6 +79,7 @@ def apply_intervention(state: SimulationState, intervention: Intervention) -> st
                 agent_id=intervention.agent_id,
                 target_agent_id=intervention.target_agent_id,
                 content_id=intervention.content_id,
+                claim_id=intervention.claim_id,
                 created_tick=state.tick,
                 apply_at_tick=state.tick + intervention.delay_ticks,
                 semantic_key=f"intervention:{intervention_id}:{intervention.kind.value}",
@@ -89,6 +96,7 @@ def apply_intervention(state: SimulationState, intervention: Intervention) -> st
             agent_id=intervention.agent_id,
             target_agent_id=intervention.target_agent_id,
             content_id=intervention.content_id,
+            claim_id=intervention.claim_id,
             created_tick=state.tick,
             apply_at_tick=state.tick,
             applied_tick=state.tick,
@@ -103,7 +111,11 @@ def apply_now(state: SimulationState, intervention: Intervention, *, interventio
     validate_intervention(state, intervention)
     if intervention.kind is InterventionKind.COUNTEREVIDENCE:
         author_id = intervention.agent_id or sorted(state.agents)[0]
-        parent = _latest_claim_content(state, intervention.topic)
+        parent = (
+            next(content for content in state.contents
+                 if content.id == state.claims[intervention.claim_id].origin_content_id)
+            if intervention.claim_id is not None else _latest_claim_content(state, intervention.topic)
+        )
         append_content(
             state,
             author_id=author_id,
@@ -147,11 +159,20 @@ def apply_now(state: SimulationState, intervention: Intervention, *, interventio
                 ),
             )
             relationship.trust = max(0.0, min(1.0, relationship.trust + intervention.delta))
+            append_causal_link(
+                state, intervention_ref(intervention_id), relationship_ref(observer.id, target_id),
+                "shifted_relationship_trust", tick=state.tick,
+            )
     elif intervention.kind is InterventionKind.FACT_CHECK:
-        state.config.fact_check_probability = max(
-            0.0,
-            min(1.0, state.config.fact_check_probability + intervention.strength * 0.35),
-        )
+        if intervention.agent_id:
+            policies = state.fact_check_policies.setdefault(intervention.agent_id, {})
+            topic = intervention.topic or "*"
+            policies[topic] = min(1.0, policies.get(topic, 0.0) + intervention.strength * 0.35)
+        else:
+            state.config.fact_check_probability = max(
+                0.0,
+                min(1.0, state.config.fact_check_probability + intervention.strength * 0.35),
+            )
     elif intervention.kind is InterventionKind.SUPPRESS_CITIZEN:
         if intervention.agent_id not in state.suppressed_citizen_ids:
             state.suppressed_citizen_ids.append(intervention.agent_id)

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "name": "One rumor, three fictional futures",
+  "hypothesis": "Correction timing changes the modeled propagation of a fictional transit claim.",
+  "seed": 9001,
+  "ticks": 4,
+  "source": { "mode": "generated", "universe_id": "prime" },
+  "simulation": {
+    "population": 12,
+    "max_relationships": 4,
+    "max_following": 2,
+    "initial_network": { "structure": "ring", "max_edges_per_agent": 4, "ring_degree": 2 }
+  },
+  "agent_composition": { "civic_participant": 6, "evidence_keeper": 4, "bridge_builder": 2 },
+  "claims": [
+    {
+      "id": "transit-rumor",
+      "topic": "fictional transit",
+      "text": "SIMULATED CLAIM: the imaginary night bus has been cancelled.",
+      "truth_label": false,
+      "credibility": 0.45,
+      "author_id": "citizen-001",
+      "visibility": 1.0,
+      "reshare_probability": 0.75
+    }
+  ],
+  "baseline_arm_id": "baseline",
+  "arms": [
+    { "id": "baseline", "name": "No correction", "schedule": [] },
+    {
+      "id": "immediate",
+      "name": "Immediate credible correction",
+      "schedule": [
+        {
+          "at_tick": 0,
+          "claim_id": "transit-rumor",
+          "intervention": {
+            "kind": "counterevidence",
+            "topic": "fictional transit",
+            "text": "SIMULATED EVIDENCE: the imaginary transit ledger confirms service.",
+            "truth_label": true,
+            "strength": 0.9,
+            "agent_id": "citizen-002"
+          }
+        }
+      ]
+    },
+    {
+      "id": "delayed",
+      "name": "Correction after two ticks",
+      "schedule": [
+        {
+          "at_tick": 2,
+          "claim_id": "transit-rumor",
+          "intervention": {
+            "kind": "counterevidence",
+            "topic": "fictional transit",
+            "text": "SIMULATED EVIDENCE: the imaginary transit ledger confirms service.",
+            "truth_label": true,
+            "strength": 0.9,
+            "agent_id": "citizen-002"
+          }
+        }
+      ]
+    }
+  ],
+  "computational_budget": 2000
+}

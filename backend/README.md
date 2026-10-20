@@ -38,11 +38,13 @@ Useful endpoints:
 - `POST /experiment-batches` (or `/experiments/batches`) — validate and execute a bounded serial multi-seed batch.
 - `GET /experiment-batches`, `GET /experiment-batches/{batch_id}`, `GET /experiment-batches/{batch_id}/progress`, and `GET /experiment-batches/{batch_id}/runs` — list, inspect, monitor, and retrieve linked child runs; `/experiments/batches` aliases are also supported.
 - `GET /analytics` — calculated engagement, belief, relationship, polarization, and topic metrics.
+- `GET /analytics/diagnostics` — nullable claim activity and evidence diagnostics; legacy `belief_accuracy` is retained separately for compatibility.
 - `GET /analytics/history` — current-universe or durable-run per-tick history with branch and tick filters.
 - `GET /analytics/claims` and `GET /analytics/claims/{claim_id}` — claim lifecycle/provenance and exposure, reshare, reply, fact-check, and correction analytics.
 - `GET /traces?tick=1` — decision traces for every lifecycle phase.
 - `GET /export/json` — downloadable state JSON.
 - `POST /state/save` and `POST /state/load` — canonical Prime snapshot persistence; experiment artifacts are filtered out of this compatibility path.
+- `/multi-experiments` — versioned configurable multi-arm runs: schema, validation/preview, creation/list/detail, arm histories, config/bundle export, authoritative bundle-import preview/import, and exact-source rerun. See [the complete Phase 6 contract](../docs/MULTI_ARM_EXPERIMENTS.md).
 
 The citizen decision lifecycle is:
 
@@ -72,3 +74,5 @@ docker run --rm -p 8000:8000 -v "$PWD/data:/app/data" npc-internet-backend
 ```
 
 SQLite snapshots, experiment runs, and normalized metric history are written to `./data/socionet.sqlite3` by default. The repository initializes or additively migrates its schema on open. If SQLite cannot be opened, the repository falls back to the original canonical JSON snapshot plus tagged snapshot/run/metric sidecars beside the configured database path. History retention is bounded to 200 recent samples per state or branch.
+
+Schema v5 adds multi-arm experiment metadata without rewriting old snapshots. Multi-arm sources/final frames have separate provenance tags and cannot become canonical Prime. Use one backend worker: execution is synchronous under the service lock, with an effective 2,000-agent-tick ceiling. Imported bundles are size/hash/reference/version checked; interrupted runs become failed records. Corrupt data and SQLite lock errors propagate rather than silently opening a different empty world.

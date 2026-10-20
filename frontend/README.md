@@ -10,7 +10,7 @@ Standalone React + TypeScript + Vite frontend for the simulation command center.
 
 ```sh
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -50,7 +50,24 @@ npm run build
 npm test
 ```
 
-`npm test` is the single offline-safe test command and runs the TypeScript project check. `npm run build` performs the production Vite build.
+`npm test` is the single offline-safe test command. It runs the TypeScript project check and Node's native tests for experiment bounds, stale/invalid run gating, source-hash query pinning, ID references, authoritative portable-import validation requests, missing measurements, request bodies, URL encoding, HTTP/offline failures, and React rendering. No test dependencies are required. `npm run build` performs the production Vite build.
+
+## Phase 6 / multi-arm builder
+
+Open **Butterfly Lab → One question. Multiple possible worlds.** The existing catalog, batches, two-universe comparisons, and causal views follow the builder.
+
+1. Set the question, seed, population, ticks, topology and archetype counts. Counts must sum to population; advanced JSON exposes all Phase 4 simulation/archetype parameters. Execution has a **2,000 agent-tick hard cap** across all arms. `computational_budget` accepts 2–5,000, but the effective budget is `min(2000, computational_budget)`.
+2. Add claims with stable configuration IDs, an existing source citizen as author, truth labels, credibility, visibility and reshare probability.
+3. Name 2–6 arms, choose a baseline, and add immediate (`at_tick: 0`) or source-relative delayed interventions. Counterevidence references a shared claim ID. Citizen/relationship targets use explicit IDs. Community targeting is supported for seed posts and trust shifts.
+4. Click **Validate & preview plan**. The backend normalizes the config and returns source tick, prepared `source_hash` (including shared claims), population, arm costs and warnings. Editing any field or advanced JSON invalidates the plan and disables Run. Universe validation omits generation overrides and captures the live universe's seed/config; config-only universe imports may omit or set `seed` and `simulation` to null. Run sends the normalized config with `?expected_source_hash=<validated hash>` when supplied. A source conflict returns HTTP 409 before execution; the builder clears validation and asks you to validate again. Older validation responses without `source_hash` remain compatible.
+5. Run, then inspect final metrics/deltas, the selected arm versus baseline timeline, its accessible data table and bounded action log. Tick filters are absolute recorded ticks; schedule offsets are source-relative. Missing results appear as missing.
+6. Reopen server-persisted runs in history. **Duplicate** loads a configuration for a new source; **Rerun exact source** replays the saved source. Export normalized config or a portable bundle including immutable source/provenance.
+
+Use the import panel for a JSON file or pasted config/bundle. Portable bundle export, validation, and import preserve the original JSON text (including numeric tokens such as `1.0`) to retain server canonical hashes. **Validate bundle & preview plan** sends the exact bundle text to `POST /multi-experiments/import/validate`, which authoritatively validates saved-source hashes, integrity and references and returns the normalized config/plan **without execution**. Only then is **Import bundle & run** enabled; it submits that same original bundle text to `/multi-experiments/import` for exact-source execution.
+
+The adapter uses `GET /multi-experiments/schema`, `POST /multi-experiments/validate`, `POST /multi-experiments?expected_source_hash=...` (optional source-hash query), `GET /multi-experiments`, `GET /multi-experiments/:id`, `/:id/config`, `/:id/export`, `/:id/arms/:armId`, `POST /:id/rerun`, `POST /multi-experiments/import/validate`, and `POST /multi-experiments/import`. Branch requests use the backend's additive `event_limit` parameter alongside sample `limit` (both capped to 200 in the UI). History displays the latest 50 records per selected universe. Active run details refresh until terminal; requests are cancelled when changing selections or leaving the view.
+
+Offline mode permits local configuration editing/import and draft downloads, but never creates simulated results. Reconnect with the header's **Sync with API**; Phase 6-only errors/retries remain inside the builder. No backend is required for `npm test` or `npm run build`.
 
 ## Production container
 

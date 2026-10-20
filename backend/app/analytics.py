@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
-from math import sqrt
 from typing import Iterable
 
 from app.models import (
@@ -102,35 +101,172 @@ def graph_metrics_for_state(state: SimulationState) -> dict[str, object]:
 
 
 def _claim_id_for_content(content: Content, content_by_id: dict[str, Content]) -> str | None:
-    if content.claim_id:
-        return content.claim_id
-    if content.parent_id and content.parent_id in content_by_id:
-        return content_by_id[content.parent_id].claim_id
-    return None
+    """Resolve the whole ancestry, including unhydrated legacy snapshots.
+
+    Use the same origin-derived ID as the simulator, without hydrating or
+    mutating state. Malformed parent cycles must not hang a metrics request.
+    """
+
+    visited: set[str] = set()
+    origin: Content | None = None
+    current: Content | None = content
+    while current is not None:
+        if current.id in visited:
+            return None
+        visited.add(current.id)
+        if current.claim_id:
+            return current.claim_id
+        if current.claim_truth is not None:
+            origin = current
+        current = content_by_id.get(current.parent_id) if current.parent_id else None
+    return f"claim-{origin.id}" if origin else None
 
 
 def _claims_for_state(state: SimulationState) -> dict[str, Claim]:
     """Return the registry, deriving a read-only compatibility view for old snapshots."""
 
-    if state.claims:
-        return state.claims
     content_by_id = {content.id: content for content in state.contents}
-    derived: dict[str, Claim] = {}
+    # A partial registry must not hide other claims. Existing lifecycle records
+    # remain authoritative; only compatibility claims are reconstructed here.
+    derived = dict(state.claims)
+    contents_by_claim: dict[str, list[Content]] = defaultdict(list)
     for content in state.contents:
         claim_id = _claim_id_for_content(content, content_by_id)
         if claim_id is None or content.claim_truth is None:
             continue
+        contents_by_claim[claim_id].append(content)
+
+    def origin_for(contents: list[Content]) -> Content:
+        members = {content.id for content in contents}
+        roots = [content for content in contents if not content.parent_id or content.parent_id not in members]
+        return min(roots or contents, key=lambda item: (item.created_tick, item.id))
+
+    for claim_id, contents in sorted(contents_by_claim.items()):
         if claim_id not in derived:
+            origin = origin_for(contents)
             derived[claim_id] = Claim(
                 claim_id=claim_id,
-                topic=content.topic,
-                text=content.text,
-                truth_label=content.claim_truth,
-                origin_content_id=content.id,
-                origin_author_id=content.author_id,
-                created_tick=content.created_tick,
+                topic=origin.topic,
+                text=origin.text,
+                truth_label=origin.claim_truth is True,
+                origin_content_id=origin.id,
+                origin_author_id=origin.author_id,
+                created_tick=origin.created_tick,
             )
+        if claim_id not in state.claims:
+            claim = derived[claim_id]
+            for content in sorted(contents, key=lambda item: (item.created_tick, item.id)):
+                if content.kind.value != "fact_check" and not content.is_counterevidence:
+                    continue
+                if content.claim_truth == claim.truth_label:
+                    claim.status = ClaimStatus.CONFIRMED
+                elif not claim.truth_label and content.claim_truth:
+                    claim.status = ClaimStatus.CORRECTED
+                else:
+                    claim.status = ClaimStatus.DISPUTED
     return derived
+
+
+# tick, observer, observed content ID, resolved claim ID
+Observation = tuple[int, str, str, str | None]
+
+
+def _observations(state: SimulationState, content_by_id: dict[str, Content]) -> list[Observation]:
+    """Merge explicit exposures and older action observations once per record.
+
+    An action mirrors an exposure when tick/actor/observed content match. Keep
+    additional explicit exposures (including repeated observations) and fill
+    gaps from action-only history. A content-creating action's result ID is
+    never evidence that its author observed the result.
+    """
+
+    observations: list[Observation] = []
+    explicit_keys: set[tuple[int, str, str]] = set()
+    seen: set[str] = set()
+    for event in state.content_exposures:
+        if event.event_id in seen or event.actor_id not in state.agents or event.tick > state.tick:
+            continue
+        seen.add(event.event_id)
+        observed = content_by_id.get(event.content_id)
+        claim_id = _claim_id_for_content(observed, content_by_id) if observed else event.claim_id
+        observations.append((event.tick, event.actor_id, event.content_id, claim_id))
+        explicit_keys.add((event.tick, event.actor_id, event.content_id))
+
+    seen = set()
+    creating_actions = {ActionKind.POST, ActionKind.REPLY, ActionKind.FACT_CHECK}
+    for event in state.events:
+        if event.event_id in seen or event.actor_id not in state.agents or event.tick > state.tick:
+            continue
+        seen.add(event.event_id)
+        observed_id = event.observed_content_id
+        if observed_id is None and event.action not in creating_actions:
+            observed_id = event.content_id
+        if observed_id is None or (event.tick, event.actor_id, observed_id) in explicit_keys:
+            continue
+        observed = content_by_id.get(observed_id)
+        claim_id = _claim_id_for_content(observed, content_by_id) if observed else event.claim_id
+        observations.append((event.tick, event.actor_id, observed_id, claim_id))
+    return observations
+
+
+def analytics_diagnostics(state: SimulationState) -> dict[str, object]:
+    """Additive, JSON-safe diagnostics awaiting the public model contract.
+
+    Beliefs are topic-scoped, with no proposition-level position/ground truth.
+    Evidence-label frequencies therefore cannot score belief accuracy. A finite
+    observation window also cannot establish when a claim will stop spreading.
+    Keep these unidentified quantities null rather than inventing measurements.
+    """
+
+    content_by_id = {content.id: content for content in state.contents}
+    contents: dict[str, list[int]] = defaultdict(list)
+    exposures: dict[str, list[int]] = defaultdict(list)
+    for content in state.contents:
+        claim_id = _claim_id_for_content(content, content_by_id)
+        if claim_id is not None:
+            contents[claim_id].append(content.created_tick)
+    for tick, _, _, claim_id in _observations(state, content_by_id):
+        if claim_id is not None:
+            exposures[claim_id].append(tick)
+    claims = {}
+    for claim_id, claim in sorted(_claims_for_state(state).items()):
+        lifecycle_ticks = [event.tick for event in claim.lifecycle]
+        correction_ticks = [event.tick for event in claim.lifecycle if event.status is ClaimStatus.CORRECTED]
+        if not correction_ticks:
+            correction_ticks.extend(
+                content.created_tick
+                for content in state.contents
+                if _claim_id_for_content(content, content_by_id) == claim_id
+                and (content.kind.value == "fact_check" or content.is_counterevidence)
+                and content.claim_truth is not None
+                and content.claim_truth != claim.truth_label
+            )
+        content_tick = max(contents[claim_id], default=claim.created_tick)
+        exposure_tick = max(exposures[claim_id], default=None)
+        lifecycle_tick = max(lifecycle_ticks, default=None)
+        last_tick = max(claim.created_tick, content_tick,
+                        exposure_tick if exposure_tick is not None else claim.created_tick,
+                        lifecycle_tick if lifecycle_tick is not None else claim.created_tick)
+        claims[claim_id] = {
+            "first_tick": claim.created_tick,
+            "last_content_tick": content_tick,
+            "last_exposure_tick": exposure_tick,
+            "last_lifecycle_tick": lifecycle_tick,
+            "last_activity_tick": last_tick,
+            "ticks_since_last_activity": max(0, state.tick - last_tick),
+            "observed_lifetime_ticks": max(0, last_tick - claim.created_tick),
+            "time_to_first_correction": min(correction_ticks) - claim.created_tick if correction_ticks else None,
+            "stopped_spreading": None,
+        }
+    beliefs = [belief for agent in state.agents.values() for belief in agent.beliefs.values()]
+    evidence_count = sum(belief.evidence_for + belief.evidence_against for belief in beliefs)
+    return {
+        "belief_accuracy": None,
+        "accuracy_evaluable_beliefs": 0,
+        "evidence_truth_fraction": sum(belief.evidence_for for belief in beliefs) / evidence_count if evidence_count else None,
+        "evidence_count": evidence_count,
+        "claims": claims,
+    }
 
 
 def claim_metrics(state: SimulationState) -> dict[str, ClaimMetrics]:
@@ -141,19 +277,17 @@ def claim_metrics(state: SimulationState) -> dict[str, ClaimMetrics]:
     contents_by_claim: dict[str, list[Content]] = defaultdict(list)
     for content in state.contents:
         claim_id = _claim_id_for_content(content, content_by_id)
-        if claim_id is not None and content.claim_truth is not None:
+        if claim_id is not None:
             contents_by_claim[claim_id].append(content)
 
     exposure_agents: dict[str, set[str]] = defaultdict(set)
     exposure_counts: Counter[str] = Counter()
-    for event in state.events:
-        claim_id = event.claim_id
-        if claim_id is None and event.observed_content_id:
-            observed = content_by_id.get(event.observed_content_id)
-            claim_id = _claim_id_for_content(observed, content_by_id) if observed else None
-        if claim_id is not None and event.observed_content_id:
+    exposure_ticks: dict[str, list[int]] = defaultdict(list)
+    for tick, actor_id, _, claim_id in _observations(state, content_by_id):
+        if claim_id is not None:
             exposure_counts[claim_id] += 1
-            exposure_agents[claim_id].add(event.actor_id)
+            exposure_agents[claim_id].add(actor_id)
+            exposure_ticks[claim_id].append(tick)
 
     calculated: dict[str, ClaimMetrics] = {}
     for claim_id in sorted(claims):
@@ -164,7 +298,8 @@ def claim_metrics(state: SimulationState) -> dict[str, ClaimMetrics]:
         fact_checks = [content for content in related if content.kind.value == "fact_check"]
         corrections = [
             content
-            for content in fact_checks
+            for content in related
+            if (content.kind.value == "fact_check" or content.is_counterevidence)
             if content.claim_truth is not None and content.claim_truth != claim.truth_label
         ]
         reshares = [content for content in related if content.is_reshare or content.kind.value == "reply"]
@@ -173,8 +308,9 @@ def claim_metrics(state: SimulationState) -> dict[str, ClaimMetrics]:
             topic=claim.topic,
             status=claim.status,
             truth_label=claim.truth_label,
-            first_tick=min((content.created_tick for content in related), default=claim.created_tick),
-            last_tick=max((content.created_tick for content in related), default=claim.created_tick),
+            first_tick=min([claim.created_tick, *(content.created_tick for content in related)]),
+            last_tick=max([claim.created_tick, *(content.created_tick for content in related),
+                           *exposure_ticks[claim_id], *(event.tick for event in claim.lifecycle)]),
             exposures=exposure_counts[claim_id],
             unique_exposed_agents=len(exposure_agents[claim_id]),
             reshares=len(reshares),
@@ -189,23 +325,32 @@ def claim_metrics(state: SimulationState) -> dict[str, ClaimMetrics]:
 def calculate_metrics(state: SimulationState) -> Metrics:
     counts = Counter(event.action for event in state.events)
     contents_by_kind = Counter(content.kind.value for content in state.contents)
-    agents = list(state.agents.values())
-    all_beliefs = [belief for agent in agents for belief in agent.beliefs.values()]
+    agents = sorted(state.agents.values(), key=lambda agent: agent.id)
+    all_beliefs = [belief for agent in agents for _, belief in sorted(agent.beliefs.items())]
     all_relationships = [relationship for agent in agents for relationship in agent.relationships.values()]
     average_confidence = _average([belief.confidence for belief in all_beliefs])
     average_trust = _average([relationship.trust for relationship in all_relationships])
-    stances = [belief.stance for belief in all_beliefs]
-    polarization = _average([abs(stance - _average(stances)) for stance in stances])
+    beliefs_by_topic = defaultdict(list)
+    for belief in all_beliefs:
+        beliefs_by_topic[belief.topic].append(belief)
+    topic_polarization = {}
+    for topic, beliefs in sorted(beliefs_by_topic.items()):
+        mean_stance = _average([belief.stance for belief in beliefs])
+        topic_polarization[topic] = _average([abs(belief.stance - mean_stance) for belief in beliefs])
+    # Each observed agent/topic belief receives one unit of weight. Missing
+    # beliefs are not neutral votes; topic positions are not pooled together.
+    polarization = sum(topic_polarization[topic] * len(beliefs)
+                       for topic, beliefs in beliefs_by_topic.items()) / max(1, len(all_beliefs))
     evidence_total = sum(belief.evidence_for + belief.evidence_against for belief in all_beliefs)
     evidence_for = sum(belief.evidence_for for belief in all_beliefs)
     active_agents = len({event.actor_id for event in state.events if event.action is not ActionKind.IGNORE})
     non_ignores = len(state.events) - counts[ActionKind.IGNORE]
     engagement_rate = non_ignores / max(1, len(agents) * max(1, state.tick))
-    exposure_events = [event for event in state.events if event.content_id]
+    exposure_events = _observations(state, {content.id: content for content in state.contents})
     exposure_rate = len(exposure_events) / max(1, len(agents) * max(1, state.tick))
     reshare_rate = counts[ActionKind.REPLY] / max(1, contents_by_kind["post"])
     counterevidence_ids = {content.id for content in state.contents if content.is_counterevidence}
-    correction_events = {event.actor_id for event in state.events if event.content_id in counterevidence_ids}
+    correction_events = {actor_id for _, actor_id, content_id, _ in exposure_events if content_id in counterevidence_ids}
     correction_reach = len(correction_events) / max(1, len(agents))
     memberships = [len(community.member_ids) for community in state.communities.values()]
     community_fragmentation = 1 - max(memberships, default=0) / max(1, sum(memberships))
@@ -219,9 +364,11 @@ def calculate_metrics(state: SimulationState) -> Metrics:
         "top_10_percent": round(sum(sorted(action_influence.values(), reverse=True)[: max(1, len(agents) // 10)]) / max(1, influence_total), 6),
         "bottom_50_percent": round(sum(sorted(action_influence.values())[: max(1, len(agents) // 2)]) / max(1, influence_total), 6),
     }
-    claim_ticks = [content.created_tick for content in state.contents if content.claim_truth is not None]
-    last_claim_tick = max(claim_ticks, default=0)
-    time_until_claim_stops_spreading = max(0, state.tick - last_claim_tick) if claim_ticks else 0
+    calculated_claims = claim_metrics(state)
+    last_claim_tick = max((claim.last_tick for claim in calculated_claims.values()), default=state.tick)
+    # Legacy wire name: this is ticks since recorded claim activity, not an
+    # estimate of future cessation. See analytics_diagnostics for honest names.
+    time_until_claim_stops_spreading = max(0, state.tick - last_claim_tick)
 
     topics: dict[str, dict[str, float | int]] = defaultdict(lambda: {
         "contents": 0,
@@ -240,6 +387,13 @@ def calculate_metrics(state: SimulationState) -> Metrics:
             float(topic_metrics["average_credibility"]) / max(1, int(topic_metrics["contents"])),
             6,
         )
+    for topic, beliefs in sorted(beliefs_by_topic.items()):
+        topics[topic]["belief_count"] = len(beliefs)
+        topics[topic]["polarization"] = round(topic_polarization[topic], 6)
+        total = sum(belief.evidence_for + belief.evidence_against for belief in beliefs)
+        topics[topic]["evidence_count"] = total
+        if total:
+            topics[topic]["evidence_truth_fraction"] = sum(belief.evidence_for for belief in beliefs) / total
 
     graph = graph_metrics_for_state(state)
     return Metrics(
@@ -258,6 +412,9 @@ def calculate_metrics(state: SimulationState) -> Metrics:
         average_belief_confidence=round(average_confidence, 6),
         average_relationship_trust=round(average_trust, 6),
         polarization=round(polarization, 6),
+        # Deprecated compatibility scalar: the schema requires a float. It is
+        # the evidence truth fraction, NOT validated belief accuracy. The
+        # nullable accuracy/denominator contract is in analytics_diagnostics.
         belief_accuracy=round(evidence_for / evidence_total if evidence_total else 0.0, 6),
         engagement_rate=round(engagement_rate, 6),
         exposure_rate=round(exposure_rate, 6),
@@ -267,7 +424,7 @@ def calculate_metrics(state: SimulationState) -> Metrics:
         influence_distribution=influence_distribution,
         time_until_claim_stops_spreading=time_until_claim_stops_spreading,
         topic_metrics=dict(sorted(topics.items())),
-        claim_metrics=claim_metrics(state),
+        claim_metrics=calculated_claims,
         degree=graph["degree"],
         betweenness=graph["betweenness"],
         average_degree=float(graph["average_degree"]),

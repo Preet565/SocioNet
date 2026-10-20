@@ -7,6 +7,7 @@ from app.persistence import (
     EXPERIMENT_SOURCE_PROVENANCE,
     JSONRepository,
     SQLiteRepository,
+    SCHEMA_VERSION,
     export_json,
 )
 from app.simulation import Simulation
@@ -99,6 +100,6 @@ def test_existing_sqlite_schema_is_migrated_additively(tmp_path) -> None:
         assert {"provenance", "universe_id", "experiment_run_id"} <= columns
         run_columns = {row[1] for row in connection.execute("PRAGMA table_info(experiment_runs)")}
         assert {"batch_id", "repetition", "arm_seed"} <= run_columns
-        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "4"
+        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert {"metric_samples", "claim_metric_samples", "experiment_batches"} <= tables

@@ -183,6 +183,7 @@ export interface HealthResponse {
 }
 
 export interface ExperimentMetricSnapshot {
+  [metric: string]: number | Record<string, ClaimMetricSnapshot> | undefined
   tick: number
   population: number
   total_contents: number
@@ -330,7 +331,7 @@ export interface CausalEvidence {
 
 export interface BranchComparison {
   comparison_type: string
-  equivalence: 'identical' | 'diverged'
+  equivalence: 'identical' | 'diverged' | 'unknown'
   control_event_count: number
   treatment_event_count: number
   matched_event_count: number
@@ -471,7 +472,7 @@ export interface BatchDescriptiveStatistics {
   median?: number | null
   variance?: number | null
   standardDeviation?: number | null
-  confidenceInterval?: { lower: number; upper: number; level: number; method: string } | null
+  confidenceInterval?: { lower: number; upper: number; level: number; method?: string; target?: string } | null
 }
 
 export interface BatchMetricSummary {

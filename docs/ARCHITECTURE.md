@@ -32,6 +32,7 @@ The trace contains execution facts and rule inputs. It does not claim to expose 
 - `simulation.py`: tick orchestration and lifecycle.
 - `interventions.py`: typed validation, immediate/delayed application, intervention history.
 - `experiments.py`: deep-copy fork from one snapshot and metric comparison.
+- `multi_experiments.py`: strict schema-v1 configuration, copied source preparation, deterministic multi-arm execution, hashing, portable bundle validation and durable publication; `multi_api.py` is the HTTP adapter.
 - `causality.py`: deterministic ancestry registry, ID-independent semantic branch comparison, impact summaries, and dependency-graph projections.
 - `analytics.py`: event-derived metrics, claim-specific metrics, and bounded history samples.
 - `persistence.py`: additive SQLite schema migration, provenance-filtered snapshots, durable experiment runs and batches, normalized metric/claim history, and JSON fallback.
@@ -80,7 +81,7 @@ Claim-specific history uses these definitions:
 - **Claim fact-check**: claim-bearing content with `kind=fact_check`.
 - **Claim correction**: fact-check or counterevidence whose truth label contradicts the origin claim; this transition marks a false claim `corrected`.
 
-The historical endpoints accept bounded tick ranges, branch/run filters, claim ID, status, and topic filters. The Butterfly Lab chart renders persisted control/treatment samples and lets the observer switch between content, exposure, reshare, correction, engagement, and polarization series. Every metric is recomputed from the current state and event log. Values describe a fictional model only.
+The historical endpoints accept bounded tick ranges, branch/run filters, claim ID, status, and topic filters. The Butterfly Lab chart renders persisted control/treatment samples and lets the observer switch between content, exposure, reshare, correction, engagement, and polarization series. Every metric is recomputed from the current state and event log. Values describe a fictional model only. The compatibility `Metrics.belief_accuracy` scalar remains an evidence-for fraction because older clients require a numeric field; it is not a validated belief-accuracy estimate. `GET /analytics/diagnostics` exposes the honest nullable accuracy field, evidence counts/fraction, and claim activity diagnostics. Similarly, `time_until_claim_stops_spreading` means ticks since the latest recorded claim activity; it does not predict future cessation from a finite window.
 
 ## Phase 4 dynamic topology
 
@@ -99,3 +100,13 @@ Membership changes append `CommunityEvent` records with kinds `join`, `leave`, `
 `impact_summary()` compares observable citizen activity/beliefs/relationships, claim propagation metrics, and community membership/event summaries. `causal_graph()` returns typed citizen, relationship, intervention, claim, content, exposure, decision, belief-update, and action nodes plus recorded links. The graph's edge label is always `modeled_dependency`; `statistical_causal_effects` is empty and the payload states `not statistically established effect`. A paired run describes this simulator's declared dependencies; it does not estimate a statistical causal effect.
 
 The `/perturbations` endpoint accepts exactly one immediate suppression intervention. Citizen suppression stops that citizen's lifecycle and outgoing relationship evolution while retaining existing state and incoming ties. Post suppression marks one existing top-level post unavailable to future observation. Relationship suppression removes and blocks one directional source-to-target tie, leaving the reverse direction independent. Target existence, post kind, distinct relationship endpoints, and unrelated perturbation fields are validated before either branch runs.
+
+## Phase 6 multi-universe configurations
+
+Schema-v1 JSON configurations define one immutable source, shared claims, exact archetype counts or trait defaults, named arms, a baseline, and source-relative schedules. Validation and execution call the same `prepare_experiment()` path; only execution persists. All arms deep-copy the source **after** common claim injection and before arm-specific interventions. Live universes are never replaced by experimental arms.
+
+Schema-v5 SQLite adds `multi_experiments` while reusing tagged snapshot storage and `(run ID, arm ID, tick)` metric samples. Source/arm provenance tags are distinct from canonical and paired-run tags. Completed references are published only after artifacts and histories commit; interrupted runs recover as failed. JSON fallback artifacts use atomic replacement, and malformed records are not silently discarded.
+
+The builder passes `plan.source_hash` as an execution precondition to close the preview/run race, including changes within the same tick. Portable bundles include the captured source, canonical SHA-256 hashes and an engine version; import validates these before executing anew. Exact rerun uses the saved source, whereas duplicate-config uses a new generated/live source. Full semantics and limits are in [MULTI_ARM_EXPERIMENTS.md](MULTI_ARM_EXPERIMENTS.md).
+
+Frontend Phase 6 code is isolated in `ExperimentBuilder`, `ExperimentConfigForm`, `ExperimentResults`, and typed transport/helper modules rather than expanding the simulation engine into UI code. Native offline tests cover helpers, API requests and React markup; the optional live workflow exercises the frontend transport against a disposable real backend and restart.

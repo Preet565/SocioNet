@@ -34,52 +34,13 @@ import type {
   WorldEvent,
 } from './types'
 
-export const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+import { createJsonRequest, createTextRequest } from './apiRequest.ts'
+export { ApiResponseError, ApiUnavailableError } from './apiRequest.ts'
 
-export class ApiUnavailableError extends Error {
-  constructor(message = 'The simulation API is unreachable.') {
-    super(message)
-    this.name = 'ApiUnavailableError'
-  }
-}
-
-export class ApiResponseError extends Error {
-  readonly status: number
-
-  constructor(status: number, message: string) {
-    super(message)
-    this.name = 'ApiResponseError'
-    this.status = status
-  }
-}
-
-const request = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
-  let response: Response
-  try {
-    response = await fetch(`${API_URL}${path}`, {
-      ...options,
-      headers: { 'Content-Type': 'application/json', ...options.headers },
-    })
-  } catch {
-    throw new ApiUnavailableError()
-  }
-
-  const text = await response.text()
-  let payload: unknown = undefined
-  if (text) {
-    try {
-      payload = JSON.parse(text) as unknown
-    } catch {
-      payload = text
-    }
-  }
-  if (!response.ok) {
-    const record = asRecord(payload)
-    const detail = typeof record?.detail === 'string' ? record.detail : `Request failed with ${response.status}`
-    throw new ApiResponseError(response.status, detail)
-  }
-  return payload as T
-}
+const buildEnv = import.meta.env
+export const API_URL = ((buildEnv && buildEnv.VITE_API_URL) ?? 'http://localhost:8000').replace(/\/$/, '')
+export const request = createJsonRequest(API_URL)
+export const requestText = createTextRequest(API_URL)
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
@@ -92,9 +53,12 @@ const pick = (record: Record<string, unknown> | undefined, keys: string[]): unkn
 }
 
 const numberOr = (value: unknown, fallback: number): number => {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return fallback
   const numeric = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(numeric) ? numeric : fallback
 }
+
+const optionalNumber = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined
 
 const stringOr = (value: unknown, fallback: string): string => typeof value === 'string' && value.length > 0 ? value : fallback
 
@@ -119,8 +83,8 @@ const normalizeNode = (value: unknown, index: number): NetworkNode => {
     x: numberOr(pick(record, ['x', 'position_x']), Number.NaN),
     y: numberOr(pick(record, ['y', 'position_y']), Number.NaN),
     group: stringOr(pick(record, ['group', 'cluster']), undefined as unknown as string),
-    degree: numberOr(pick(record, ['degree']), 0),
-    betweenness: numberOr(pick(record, ['betweenness']), 0),
+    degree: optionalNumber(pick(record, ['degree'])),
+    betweenness: optionalNumber(pick(record, ['betweenness'])),
   }
 }
 
@@ -192,7 +156,7 @@ const normalizeExperiment = (value: unknown, index: number): Experiment => {
     description: stringOr(pick(record, ['description', 'summary']), 'No experiment description provided.'),
     status: allowed.includes(status as Experiment['status']) ? status as Experiment['status'] : 'ready',
     variables: arrayOr(pick(record, ['variables', 'parameters'])).map((variable) => String(variable)),
-    projectedImpact: stringOr(pick(record, ['projected_impact', 'impact']), 'Awaiting model output'),
+    projectedImpact: stringOr(pick(record, ['projected_impact', 'projectedImpact', 'impact']), 'Awaiting model output'),
     lastRun: typeof pick(record, ['last_run', 'lastRun']) === 'string' ? pick(record, ['last_run', 'lastRun']) as string : undefined,
     lastRunId: typeof pick(record, ['last_run_id', 'lastRunId']) === 'string' ? pick(record, ['last_run_id', 'lastRunId']) as string : undefined,
     lastRunStatus: typeof pick(record, ['last_run_status', 'lastRunStatus']) === 'string' ? pick(record, ['last_run_status', 'lastRunStatus']) as string : undefined,
@@ -228,7 +192,8 @@ const normalizeEvidence = (value: unknown): CausalEvidence => {
 
 const normalizeBranchComparison = (value: unknown): BranchComparison => {
   const record = asRecord(value) ?? {}
-  const equivalence = pick(record, ['equivalence']) === 'diverged' ? 'diverged' : 'identical'
+  const rawEquivalence = pick(record, ['equivalence'])
+  const equivalence = rawEquivalence === 'diverged' || rawEquivalence === 'identical' ? rawEquivalence : 'unknown'
   return {
     comparison_type: stringOr(pick(record, ['comparison_type']), 'semantic_event_comparison'),
     equivalence,
@@ -321,22 +286,23 @@ const normalizeMetricSnapshot = (value: unknown): ExperimentMetricSnapshot => {
   const record = asRecord(value) ?? {}
   const rawClaims = asRecord(pick(record, ['claim_metrics', 'claimMetrics'])) ?? {}
   return {
+    ...Object.fromEntries(Object.entries(record).filter(([, value]) => typeof value === 'number' && Number.isFinite(value))),
     tick: numberOr(pick(record, ['tick']), 0),
     population: numberOr(pick(record, ['population']), 0),
-    total_contents: numberOr(pick(record, ['total_contents', 'totalContents']), 0),
-    posts: numberOr(pick(record, ['posts']), 0),
-    replies: numberOr(pick(record, ['replies']), 0),
-    fact_checks: numberOr(pick(record, ['fact_checks', 'factChecks']), 0),
-    ignored_decisions: numberOr(pick(record, ['ignored_decisions', 'ignoredDecisions']), 0),
-    average_belief_confidence: numberOr(pick(record, ['average_belief_confidence', 'averageBeliefConfidence']), 0),
-    average_relationship_trust: numberOr(pick(record, ['average_relationship_trust', 'averageRelationshipTrust']), 0),
-    polarization: numberOr(pick(record, ['polarization']), 0),
-    belief_accuracy: numberOr(pick(record, ['belief_accuracy', 'beliefAccuracy']), 0),
-    engagement_rate: numberOr(pick(record, ['engagement_rate', 'engagementRate']), 0),
-    exposure_rate: numberOr(pick(record, ['exposure_rate', 'exposureRate']), 0),
-    reshare_rate: numberOr(pick(record, ['reshare_rate', 'reshareRate']), 0),
-    correction_reach: numberOr(pick(record, ['correction_reach', 'correctionReach']), 0),
-    time_until_claim_stops_spreading: numberOr(pick(record, ['time_until_claim_stops_spreading', 'timeUntilClaimStopsSpreading']), 0),
+    total_contents: numberOr(pick(record, ['total_contents', 'totalContents']), Number.NaN),
+    posts: numberOr(pick(record, ['posts']), Number.NaN),
+    replies: numberOr(pick(record, ['replies']), Number.NaN),
+    fact_checks: numberOr(pick(record, ['fact_checks', 'factChecks']), Number.NaN),
+    ignored_decisions: numberOr(pick(record, ['ignored_decisions', 'ignoredDecisions']), Number.NaN),
+    average_belief_confidence: numberOr(pick(record, ['average_belief_confidence', 'averageBeliefConfidence']), Number.NaN),
+    average_relationship_trust: numberOr(pick(record, ['average_relationship_trust', 'averageRelationshipTrust']), Number.NaN),
+    polarization: numberOr(pick(record, ['polarization']), Number.NaN),
+    belief_accuracy: numberOr(pick(record, ['belief_accuracy', 'beliefAccuracy']), Number.NaN),
+    engagement_rate: numberOr(pick(record, ['engagement_rate', 'engagementRate']), Number.NaN),
+    exposure_rate: numberOr(pick(record, ['exposure_rate', 'exposureRate']), Number.NaN),
+    reshare_rate: numberOr(pick(record, ['reshare_rate', 'reshareRate']), Number.NaN),
+    correction_reach: numberOr(pick(record, ['correction_reach', 'correctionReach']), Number.NaN),
+    time_until_claim_stops_spreading: numberOr(pick(record, ['time_until_claim_stops_spreading', 'timeUntilClaimStopsSpreading']), Number.NaN),
     claim_metrics: Object.fromEntries(Object.entries(rawClaims).map(([id, claim]) => [id, normalizeClaimMetric(claim, id)])),
   }
 }
@@ -346,6 +312,34 @@ const normalizeHistorySample = (value: unknown): MetricHistorySample => {
   return {
     tick: numberOr(pick(record, ['tick']), 0),
     metrics: normalizeMetricSnapshot(pick(record, ['metrics'])),
+  }
+}
+
+const normalizeNetworkHistory = (value: unknown): NonNullable<UniverseState['networkHistory']>[number] => {
+  const record = asRecord(value) ?? {}
+  return {
+    tick: numberOr(record.tick, 0),
+    ties: arrayOr(record.ties).map((tie) => {
+      const item = asRecord(tie) ?? {}
+      return {
+        source_id: stringOr(item.source_id, 'unknown-source'),
+        target_id: stringOr(item.target_id, 'unknown-target'),
+        affinity: numberOr(item.affinity, 0),
+        trust: numberOr(item.trust, 0),
+        follows: Boolean(item.follows),
+      }
+    }),
+    degree: Object.fromEntries(Object.entries(asRecord(record.degree) ?? {}).map(([id, value]) => [id, numberOr(value, 0)])),
+    betweenness: Object.fromEntries(Object.entries(asRecord(record.betweenness) ?? {}).map(([id, value]) => [id, numberOr(value, 0)])),
+  }
+}
+
+const normalizeCommunityHistory = (value: unknown): NonNullable<UniverseState['communityHistory']>[number] => {
+  const record = asRecord(value) ?? {}
+  const rawMemberships = asRecord(record.memberships) ?? {}
+  return {
+    tick: numberOr(record.tick, 0),
+    memberships: Object.fromEntries(Object.entries(rawMemberships).map(([id, members]) => [id, arrayOr(members).map(String)])),
   }
 }
 
@@ -419,7 +413,8 @@ const normalizeBatchStatistics = (value: unknown): BatchDescriptiveStatistics =>
       lower: numberOr(pick(interval, ['lower']), 0),
       upper: numberOr(pick(interval, ['upper']), 0),
       level: numberOr(pick(interval, ['level']), 0.95),
-      method: stringOr(pick(interval, ['method']), 'distribution-free interval'),
+      method: typeof interval.method === 'string' ? interval.method : undefined,
+      target: typeof interval.target === 'string' ? interval.target : undefined,
     } : null,
   }
 }
@@ -586,7 +581,8 @@ export const normalizeState = (payload: unknown, universeId: UniverseId): Univer
   }
   return {
     universeId,
-    label: stringOr(pick(root, ['label', 'name', 'universe']), universeId === 'prime' ? 'Prime' : 'Echo'),
+    // Live universes are independent canonical frames, not saved experiment arms.
+    label: universeId === 'prime' ? 'Prime / live universe' : 'Echo / live universe',
     phase: stringOr(pick(root, ['phase', 'stage']), 'Simulation active'),
     tick: numberOr(pick(root, ['tick', 'step', 'cycle']), 0),
     updatedAt: stringOr(pick(root, ['updated_at', 'updatedAt', 'timestamp']), new Date().toISOString()),
@@ -611,7 +607,9 @@ export const normalizeState = (payload: unknown, universeId: UniverseId): Univer
 
 const encodeUniverse = (universeId: UniverseId) => encodeURIComponent(universeId)
 
-export const api = {
+export function createSimulationApi(request: <T>(path: string, options?: RequestInit) => Promise<T>, baseUrl = API_URL) {
+  const exportBaseUrl = baseUrl.replace(/\/$/, '')
+  return {
   getHealth: () => request<HealthResponse>('/health'),
   getState: async (universeId: UniverseId) => normalizeState(await request<unknown>(`/state?universe_id=${encodeUniverse(universeId)}`), universeId),
   getExperiments: async (universeId: UniverseId) => {
@@ -625,13 +623,13 @@ export const api = {
     const root = unwrap(payload)
     return arrayOr(root.citizens ?? payload).map(normalizeCitizen)
   },
-  getCitizen: async (universeId: UniverseId, citizenId: string) => {
-    const payload = await request<unknown>(`/citizens/${encodeURIComponent(citizenId)}?universe_id=${encodeUniverse(universeId)}`)
+  getCitizen: async (universeId: UniverseId, citizenId: string, signal?: AbortSignal) => {
+    const payload = await request<unknown>(`/citizens/${encodeURIComponent(citizenId)}?universe_id=${encodeUniverse(universeId)}`, { signal })
     return normalizeCitizen(payload, 0)
   },
   tick: (universeId: UniverseId, steps = 1) => request<unknown>('/tick', { method: 'POST', body: JSON.stringify({ universe_id: universeId, steps }) }),
   reset: (universeId: UniverseId) => request<unknown>('/reset', { method: 'POST', body: JSON.stringify({ universe_id: universeId }) }),
-  runExperiment: (universeId: UniverseId, experimentId: string) => request<ExperimentComparison>('/experiments/run', { method: 'POST', body: JSON.stringify({ universe_id: universeId, experiment_id: experimentId }) }),
+  runExperiment: async (universeId: UniverseId, experimentId: string) => normalizeComparison(await request<unknown>('/experiments/run', { method: 'POST', body: JSON.stringify({ universe_id: universeId, experiment_id: experimentId }) })),
   createExperimentRun: async (universeId: UniverseId, experimentId: string) => normalizeExperimentRun(await request<unknown>('/experiment-runs', { method: 'POST', body: JSON.stringify({ universe_id: universeId, experiment_id: experimentId }) })),
   getExperimentRuns: async (universeId?: UniverseId) => {
     const query = universeId ? `?universe_id=${encodeUniverse(universeId)}` : ''
@@ -692,21 +690,24 @@ export const api = {
     if (options.fromTick !== undefined) params.set('from_tick', String(options.fromTick))
     if (options.toTick !== undefined) params.set('to_tick', String(options.toTick))
     if (options.limit !== undefined) params.set('limit', String(options.limit))
-    return request<{ samples: MetricHistorySample[]; metric_definitions: Record<string, string> }>(`/analytics/history?${params.toString()}`)
+    const payload = await request<{ samples?: unknown[]; metric_definitions?: Record<string, string> }>(`/analytics/history?${params.toString()}`)
+    return { ...payload, samples: arrayOr(payload.samples).map(normalizeHistorySample), metric_definitions: payload.metric_definitions ?? {} }
   },
-  getNetworkHistory: (universeId: UniverseId, options: { fromTick?: number; toTick?: number; limit?: number } = {}) => {
+  getNetworkHistory: async (universeId: UniverseId, options: { fromTick?: number; toTick?: number; limit?: number } = {}) => {
     const params = new URLSearchParams({ universe_id: universeId })
     if (options.fromTick !== undefined) params.set('from_tick', String(options.fromTick))
     if (options.toTick !== undefined) params.set('to_tick', String(options.toTick))
     if (options.limit !== undefined) params.set('limit', String(options.limit))
-    return request<{ samples: NonNullable<UniverseState['networkHistory']>; metric_cost: string }>(`/network/history?${params.toString()}`)
+    const payload = await request<{ samples?: unknown[]; metric_cost?: string }>(`/network/history?${params.toString()}`)
+    return { ...payload, samples: arrayOr(payload.samples).map(normalizeNetworkHistory), metric_cost: payload.metric_cost ?? '' }
   },
-  getCommunityHistory: (universeId: UniverseId, options: { fromTick?: number; toTick?: number; limit?: number } = {}) => {
+  getCommunityHistory: async (universeId: UniverseId, options: { fromTick?: number; toTick?: number; limit?: number } = {}) => {
     const params = new URLSearchParams({ universe_id: universeId })
     if (options.fromTick !== undefined) params.set('from_tick', String(options.fromTick))
     if (options.toTick !== undefined) params.set('to_tick', String(options.toTick))
     if (options.limit !== undefined) params.set('limit', String(options.limit))
-    return request<{ samples: NonNullable<UniverseState['communityHistory']>; events: NonNullable<UniverseState['communityEvents']> }>(`/communities/history?${params.toString()}`)
+    const payload = await request<{ samples?: unknown[]; events?: unknown[] }>(`/communities/history?${params.toString()}`)
+    return { ...payload, samples: arrayOr(payload.samples).map(normalizeCommunityHistory), events: arrayOr(payload.events).map((value, index) => normalizeEvent(value, index)) }
   },
   getClaims: async (universeId: UniverseId, options: { runId?: string; branch?: 'control' | 'treatment'; claimId?: string; status?: string; topic?: string; limit?: number } = {}) => {
     const params = new URLSearchParams({ universe_id: universeId })
@@ -720,6 +721,8 @@ export const api = {
     const root = unwrap(payload)
     return arrayOr(root.claims ?? payload) as ClaimRecord[]
   },
-  experimentRunExportUrl: (runId: string) => `${API_URL}/experiment-runs/${encodeURIComponent(runId)}/export`,
+  experimentRunExportUrl: (runId: string) => `${exportBaseUrl}/experiment-runs/${encodeURIComponent(runId)}/export`,
   intervene: (universeId: UniverseId, input: { action: string; target: string; intensity: number; rationale: string }) => request<unknown>('/interventions', { method: 'POST', body: JSON.stringify({ universe_id: universeId, ...input }) }),
-}
+} }
+
+export const api = createSimulationApi(request)

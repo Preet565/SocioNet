@@ -171,6 +171,8 @@ def semantic_event_signature(event: ActionEvent, state: SimulationState) -> dict
             "reshare": content.is_reshare,
             "provenance": content.provenance,
             "suppressed": content.suppressed,
+            "visibility": content.visibility,
+            "reshare_probability": content.reshare_probability,
         }
 
     target_id: str | None = event.target_id
@@ -240,6 +242,7 @@ def _semantic_intervention_signature(record: Any, state: SimulationState) -> dic
         "agent_id": record.agent_id,
         "target_agent_id": record.target_agent_id,
         "content_id": content_id,
+        "claim": semantic_claim_key(record.claim_id, state),
     }
 
 

@@ -134,6 +134,8 @@ class Content(BaseModel):
     provenance_event_ids: list[str] = Field(default_factory=list)
     semantic_key: str | None = None
     suppressed: bool = False
+    visibility: float = Field(default=1.0, ge=0, le=1)
+    reshare_probability: float = Field(default=1.0, ge=0, le=1)
 
 
 class ClaimProvenanceRecord(BaseModel):
@@ -167,6 +169,8 @@ class Claim(BaseModel):
     created_tick: int = Field(ge=0)
     origin_source: str = "organic"
     origin_intervention_id: str | None = None
+    visibility: float = Field(default=1.0, ge=0, le=1)
+    reshare_probability: float = Field(default=1.0, ge=0, le=1)
     status: ClaimStatus = ClaimStatus.ACTIVE
     provenance: list[ClaimProvenanceRecord] = Field(default_factory=list)
     lifecycle: list[ClaimLifecycleEvent] = Field(default_factory=list)
@@ -454,6 +458,7 @@ class InterventionRecord(BaseModel):
     agent_id: str | None = None
     target_agent_id: str | None = None
     content_id: str | None = None
+    claim_id: str | None = None
     semantic_key: str | None = None
     parent_event_ids: list[str] = Field(default_factory=list)
     provenance_event_ids: list[str] = Field(default_factory=list)
@@ -474,6 +479,7 @@ class Intervention(BaseModel):
     truth_label: bool | None = None
     text: str | None = None
     content_id: str | None = None
+    claim_id: str | None = None
 
     @field_validator("topic")
     @classmethod
@@ -491,6 +497,8 @@ class Intervention(BaseModel):
 
     @model_validator(mode="after")
     def validate_shape(self) -> "Intervention":
+        if self.claim_id is not None and self.kind is not InterventionKind.COUNTEREVIDENCE:
+            raise ValueError("claim_id is supported only by counterevidence")
         if self.kind in {InterventionKind.COUNTEREVIDENCE, InterventionKind.SEED_POST} and not self.topic:
             raise ValueError(f"{self.kind.value} intervention requires topic")
         if self.kind is InterventionKind.TRUST_SHIFT and not self.target_agent_id:
@@ -555,6 +563,8 @@ class SimulationState(BaseModel):
     scheduled_interventions: list[ScheduledIntervention] = Field(default_factory=list)
     applied_interventions: list[str] = Field(default_factory=list)
     intervention_history: list[InterventionRecord] = Field(default_factory=list)
+    # Additive citizen/topic-scoped fact-check boosts; old snapshots default empty.
+    fact_check_policies: dict[str, dict[str, float]] = Field(default_factory=dict)
     suppressed_citizen_ids: list[str] = Field(default_factory=list)
     suppressed_post_ids: list[str] = Field(default_factory=list)
     suppressed_relationships: list[SuppressedRelationship] = Field(default_factory=list)

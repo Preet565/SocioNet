@@ -166,3 +166,66 @@ The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it
 - The ancestry graph records deterministic simulator dependencies; it does not estimate statistical causal effects or make claims about real populations.
 - Citizen suppression leaves prior content and incoming ties in place; post suppression targets one existing top-level post; relationship suppression is directional.
 - Impact summaries are calculated from the saved paired branch states and bounded event histories. They do not reconstruct passive reach or historical records that were never persisted.
+
+## Phase 6 — configurable multi-universe experiment builder
+
+### Implemented
+
+- Added strict schema-v1 JSON configuration and JSON Schema endpoint; generated and copied live-universe sources; configurable population/topology/archetype parameters and exact composition.
+- Shared claims are injected once before every arm forks; explicit claim IDs, credibility, visibility and reshare policies influence the engine. Added targeted fact-check policies without removing legacy global interventions.
+- Added 2–6 named arms and a selected common baseline, immediate/source-relative schedules, validated citizen/post/claim/directional-relationship targets, and captured community observer/messenger semantics.
+- Reused `Simulation`, interventions, metric histories and semantic comparisons; new execution remains independent of the HTTP adapter and browser.
+- Added immutable config/source SHA-256 checksums, matching per-arm initial hashes, final tagged snapshots, baseline deltas, real metric/event history and durable failures. SQLite migration v5 adds `multi_experiments`; old snapshots are preserved.
+- Added source-hash preconditions to reject stale preview/run sources (including same-tick mutations), read-only config/bundle validation, exact-source rerun, portable manifest import/export and config duplication.
+- Added Butterfly Lab structured editor, advanced JSON, import/export, source/cost preview, history/reopen, per-arm results, timeline/event drill-down, accessible tables and loading/empty/error/offline states.
+- Added atomic JSON fallback publication and explicit corruption/locking errors. Interrupted runs recover as failed; storage failures never publish completed dangling references.
+- Added offline native frontend tests and an optional live HTTP test using the real frontend transport against disposable Uvicorn/SQLite instances, including backend restart.
+- Isolated the backend's import-time default service database before pytest collection, so ordinary test collection no longer opens or recovers the user's live database.
+- Documented the contract in `docs/MULTI_ARM_EXPERIMENTS.md` and added `docs/examples/multi-arm-rumor.json`.
+
+### Verification
+
+Runtime used here: Python **3.14.7**, Node **22.22.0** on macOS. The pinned container Python is still 3.12.8; no dependency/runtime upgrade was made.
+
+```text
+make test
+  131 backend tests passed; one existing Starlette/httpx deprecation warning
+  frontend TypeScript passed; 30 frontend tests passed
+  one opt-in live test skipped in the offline command
+  production frontend build passed (27 modules)
+SOCIONET_LIVE_TEST=1 node --experimental-strip-types --test tests/liveWorkflow.test.mjs
+  from frontend/: 1 live cross-stack workflow passed, no skips
+docker compose config --quiet
+  passed
+git diff --check
+  passed
+```
+
+The live workflow validated/ran three arms, checked equal initial hashes and delayed evidence timing, queried events/histories, verified canonical isolation, round-tripped the exported configuration, imported/reran results and reopened them after restarting the real HTTP backend. No user database was reset.
+
+The documented example was also executed directly: **12 citizens × 4 ticks × 3 arms = 144 agent-ticks**, 48 final action events per arm, **0.130 seconds** for prepare + three-arm simulation on this machine (no HTTP or persistence in that timing; a concurrent test process was present). The source hash stayed unchanged. This is a local smoke measurement, not a Linux/container benchmark.
+
+### Known limitations and next phase
+
+- Effective cost cap is `min(configured budget, 2000)` agent-ticks, with 100 citizens/20 ticks/6 arms as individual maxima. Source/config/bundle sizes and response counts are bounded. Large live worlds are rejected, not truncated.
+- Execution is synchronous and serialized under a single-process service lock; use one backend worker. No background queue or cancellation is claimed. Browser requests await completion.
+- A crash may leave orphan artifacts; running records recover as failed on restart and can be explicitly rerun.
+- Exact bundle replay requires the same engine version. Hashes detect integrity changes, not authenticity. The UI preserves raw bundle numeric tokens during transfer.
+- Docker daemon was unavailable, so image build/run was **not** verified. No browser click/visual end-to-end automation was available; verification covers React markup, frontend logic/transport and live HTTP integration.
+- Phase 7 sensitivity/ablation/optimization is next. Phases 7–10 remain unimplemented.
+
+## Complete Phases 1–6 audit checkpoint
+
+### Audit result
+
+- Added `docs/PROJECT_AUDIT_REPORT.md` with a feature matrix, cross-phase workflows, defects/root causes/fixes, security/resource review, exact commands, limitations and release decision.
+- Added audit regression fixtures for analytics/claim ancestry/exposure semantics, statistical robustness, persistence/API recovery, corruption/resource validation, and Phase 6 integration.
+- Final backend result: **188 passed**, one existing non-failing Starlette/httpx deprecation warning.
+- Final frontend result: **36 passed** with `SOCIONET_LIVE_TEST=1`, typecheck/build passed. Default `npm test` passes with the opt-in live test skipped.
+- Final live HTTP workflow: frontend transport → disposable Uvicorn/FastAPI → temporary SQLite → restart/reopen passed.
+- `docker compose config --quiet`, compileall and diff/secret/path checks passed.
+- Docker image build is blocked only by the unavailable local Docker daemon.
+
+### Release decision
+
+**READY WITH LIMITATIONS.** Core simulation, persistence, experiments, batches, causal comparison, multi-arm builder, frontend transport and restart workflows are verified. Docker runtime and browser visual automation remain explicitly unverified, and synchronous single-process execution remains an intentional limitation.

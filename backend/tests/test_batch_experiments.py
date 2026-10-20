@@ -54,7 +54,7 @@ def test_descriptive_statistics_and_paired_effect_sizes_are_deterministic() -> N
     assert summary.confidence_interval.lower == 1
     assert summary.confidence_interval.upper == 3
     assert effect.paired_cohens_d == 2
-    assert effect.cliffs_delta == 1
+    assert effect.cliffs_delta is None
     assert effect.probability_treatment_better == 1
 
 

@@ -76,12 +76,23 @@ def create_initial_state(
     *,
     count: int | None = None,
     config: SimulationConfig | None = None,
+    agent_composition: dict[str, int] | None = None,
 ) -> SimulationState:
     if config is None:
         config = SimulationConfig(population=count if count is not None else 100)
     elif count is not None and config.population != count:
         config = SimulationConfig.model_validate({**config.model_dump(), "population": count})
     agents = create_citizens(seed, count=config.population, config=config)
+    if agent_composition:
+        if sum(agent_composition.values()) != config.population or any(
+            key not in config.archetypes or count < 0 for key, count in agent_composition.items()
+        ):
+            raise ValueError("composition must use configured archetypes and sum to population")
+        ids = sorted(agents)
+        rng_for(seed, "agent-composition").shuffle(ids)
+        archetypes = [key for key, count in sorted(agent_composition.items()) for _ in range(count)]
+        for agent_id, archetype in zip(ids, archetypes):
+            agents[agent_id].archetype = archetype
     communities = create_communities(seed, agents, config=config)
     initialize_relationships(seed, agents, communities, config)
     state = SimulationState(
@@ -186,6 +197,8 @@ def _register_claim_content(
             created_tick=content.created_tick,
             origin_source=source,
             origin_intervention_id=intervention_id,
+            visibility=content.visibility,
+            reshare_probability=content.reshare_probability,
             lifecycle=[
                 ClaimLifecycleEvent(
                     status=ClaimStatus.ACTIVE,
@@ -263,6 +276,8 @@ def append_content(
     is_reshare: bool = False,
     parent_event_ids: list[str] | None = None,
     provenance_event_ids: list[str] | None = None,
+    visibility: float | None = None,
+    reshare_probability: float | None = None,
 ) -> Content:
     content_id = f"content-{len(state.contents) + 1:06d}"
     parent = next((item for item in reversed(state.contents) if item.id == parent_id), None) if parent_id else None
@@ -286,6 +301,9 @@ def append_content(
         intervention_id=intervention_id,
         parent_event_ids=parent_event_ids or [],
         provenance_event_ids=provenance_event_ids or [],
+        visibility=visibility if visibility is not None else (parent.visibility if parent else 1.0),
+        reshare_probability=(reshare_probability if reshare_probability is not None else
+                             (parent.reshare_probability if parent else 1.0)),
     )
     state.contents.append(content)
     if resolved_claim_id is not None and claim_truth is not None:
@@ -470,6 +488,9 @@ class Simulation:
             and not content.suppressed
             and content.id not in self.state.suppressed_post_ids
             and not self._relationship_suppressed(agent.id, content.author_id)
+            and (content.visibility >= 1.0 or rng_for(
+                self.state.seed, "content-visibility", self.state.tick, agent.id, content.id,
+            ).random() < content.visibility)
         ]
         if not visible:
             return None
@@ -535,9 +556,12 @@ class Simulation:
             self.state.config.post_probability * (0.45 + agent.curiosity * 0.55) * behavior.post_bias,
         ):
             return ActionKind.POST
+        policies = self.state.fact_check_policies.get(agent.id, {})
+        fact_check_probability = (self.state.config.fact_check_probability
+                                  + policies.get("*", 0.0) + policies.get(content.topic, 0.0))
         if content.claim_truth is not None and rng.random() < min(
             1.0,
-            (self.state.config.fact_check_probability + agent.skepticism * 0.18) * behavior.fact_check_bias,
+            (fact_check_probability + agent.skepticism * 0.18) * behavior.fact_check_bias,
         ):
             return ActionKind.FACT_CHECK
         if rng.random() < min(1.0, self.state.config.reply_probability * behavior.reply_bias):
@@ -586,6 +610,13 @@ class Simulation:
             return ActionResult(ActionKind.IGNORE, details="nothing available to act on")
         target_id = content.author_id
         if action is ActionKind.REPLY:
+            # A separate deterministic draw preserves the old RNG stream when
+            # the additive policy is omitted (probability defaults to one).
+            if content.claim_id and content.reshare_probability < 1.0 and rng_for(
+                self.state.seed, "claim-reshare", self.state.tick, agent.id, content.id,
+            ).random() >= content.reshare_probability:
+                return ActionResult(ActionKind.IGNORE, target_id=target_id, content_id=content.id,
+                                    topic=content.topic, details="claim reshare policy declined reply")
             created = append_content(
                 self.state,
                 author_id=agent.id,
