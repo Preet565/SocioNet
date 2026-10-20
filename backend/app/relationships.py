@@ -179,15 +179,29 @@ def evolve_relationships(
     agents: dict[str, Agent],
     communities: dict[str, Community],
     config: SimulationConfig,
+    suppressed_relationships: set[tuple[str, str]] | None = None,
+    suppressed_agents: set[str] | None = None,
 ) -> list[RelationshipTransition]:
-    """Decay stale ties, form compatible ties, and evolve follows in stable order."""
+    """Decay stale ties, form compatible ties, and evolve follows in stable order.
+
+    A suppressed citizen keeps its existing outgoing state but does not create,
+    remove, or evolve outgoing relationships after suppression. Incoming ties
+    remain available to the rest of the population, which keeps the
+    perturbation focused on the citizen's participation.
+    """
 
     transitions: list[RelationshipTransition] = []
+    suppressed_relationships = suppressed_relationships or set()
+    suppressed_agents = suppressed_agents or set()
     for agent_id in sorted(agents):
+        if agent_id in suppressed_agents:
+            continue
         agent = agents[agent_id]
         behavior = _archetype(agent, config)
         decay = min(1.0, config.relationship_decay_rate * behavior.relationship_decay_bias)
         for target_id in sorted(agent.relationships):
+            if (agent_id, target_id) in suppressed_relationships:
+                continue
             relationship = agent.relationships[target_id]
             if relationship.last_interaction_tick != tick:
                 relationship.affinity = round(relationship.affinity * (1.0 - decay), 6)
@@ -211,6 +225,8 @@ def evolve_relationships(
                         transitions.append(RelationshipTransition(agent_id, target_id, "follow"))
 
         for target_id in _candidate_ids(agent, agents):
+            if (agent_id, target_id) in suppressed_relationships:
+                continue
             if len(agent.relationships) >= config.max_relationships:
                 break
             if target_id in agent.relationships:

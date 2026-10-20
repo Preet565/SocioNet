@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.analytics import calculate_metrics
 from app.batch_experiments import aggregate_paired_results, derive_seed
+from app.causality import branch_causal_payload, causal_graph, compare_branches, ensure_causal_registry, impact_summary
 from app.experiments import run_side_by_side
 from app.interventions import InterventionValidationError, apply_intervention
 from app.models import (
@@ -27,6 +28,7 @@ from app.models import (
     BatchProgress,
     Intervention,
     Metrics,
+    PerturbationRequest,
     SimulationConfig,
     SimulationState,
     TickRequest,
@@ -462,6 +464,20 @@ class SimulationService:
             self.store.save_experiment_batch(record)
             return record
 
+    def create_perturbation(self, payload: PerturbationRequest) -> dict[str, Any]:
+        """Run one explicit suppression variable against an unchanged control."""
+
+        with self.lock:
+            source = self.universe(payload.universe_id).state.model_copy(deep=True)
+            return self._create_experiment_run_from_source(
+                source=source,
+                universe_id=payload.universe_id,
+                experiment_id=f"perturbation:{payload.perturbation.kind.value}",
+                ticks=payload.ticks,
+                control_interventions=[],
+                treatment_interventions=[payload.perturbation],
+            )
+
     def _snapshot_reference(self, snapshot_id: int, provenance: str) -> dict[str, Any]:
         metadata = self.store.snapshot_metadata(snapshot_id, provenance=provenance)
         return {
@@ -751,9 +767,18 @@ def _run_branch_state(run: dict[str, Any], branch: str) -> SimulationState | Non
     try:
         state = SimulationState.model_validate(result[branch])
         ensure_claim_registry(state)
+        ensure_causal_registry(state)
         return state
     except ValidationError:
         return None
+
+
+def _run_branch_pair(run: dict[str, Any]) -> tuple[SimulationState, SimulationState]:
+    control = _run_branch_state(run, "control")
+    treatment = _run_branch_state(run, "treatment")
+    if control is None or treatment is None:
+        raise HTTPException(status_code=404, detail="experiment branch states unavailable")
+    return control, treatment
 
 
 def _claim_rows(state: SimulationState, claim_id: str | None = None, status: str | None = None, topic: str | None = None) -> list[dict[str, Any]]:
@@ -940,7 +965,7 @@ def experiment_result_payload(result: ExperimentResult, experiment_id: str, univ
 
 
 def legacy_comparison_payload(result: dict[str, Any]) -> dict[str, Any]:
-    """Keep the original /experiments/run response shape stable."""
+    """Keep the original /experiments/run fields while adding Phase 5 data."""
 
     return {
         "experiment_id": result["experiment_id"],
@@ -953,6 +978,8 @@ def legacy_comparison_payload(result: dict[str, Any]) -> dict[str, Any]:
         "treatment_metrics": result["treatment_metrics"],
         "metric_deltas": result["metric_deltas"],
         "earliest_divergence": result["earliest_divergence"],
+        "branch_comparison": result.get("branch_comparison"),
+        "impact_summary": result.get("impact_summary"),
     }
 
 
@@ -971,6 +998,15 @@ def create_experiment_run(payload: ExperimentRunCreateRequest, request: Request)
             control_interventions=None if payload.experiment_id in catalog_ids and not (payload.control_interventions or payload.treatment_interventions) else payload.control_interventions,
             treatment_interventions=None if payload.experiment_id in catalog_ids and not (payload.control_interventions or payload.treatment_interventions) else payload.treatment_interventions,
         )
+    except (InterventionValidationError, ValidationError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/perturbations")
+@app.post("/causal/perturbations")
+def create_perturbation(payload: PerturbationRequest, request: Request) -> dict[str, Any]:
+    try:
+        return get_service(request).create_perturbation(payload)
     except (InterventionValidationError, ValidationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -1101,6 +1137,69 @@ def experiment_run_history(
     }
 
 
+@app.get("/causal/branch-comparison/{run_id}")
+@app.get("/experiment-runs/{run_id}/branch-comparison")
+@app.get("/experiment-runs/{run_id}/causal-comparison")
+def causal_branch_comparison(run_id: str, request: Request) -> dict[str, Any]:
+    service = get_service(request)
+    run = service.store.get_experiment_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+    control, treatment = _run_branch_pair(run)
+    return {
+        "run_id": run_id,
+        "experiment_id": run.get("experiment_id"),
+        "universe_id": run.get("universe_id"),
+        **compare_branches(control, treatment),
+    }
+
+
+@app.get("/causal/impact-summary/{run_id}")
+@app.get("/experiment-runs/{run_id}/causal-impact-summary")
+@app.get("/experiment-runs/{run_id}/impact-summary")
+def causal_impact_summary(run_id: str, request: Request) -> dict[str, Any]:
+    service = get_service(request)
+    run = service.store.get_experiment_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+    control, treatment = _run_branch_pair(run)
+    return {
+        "run_id": run_id,
+        "experiment_id": run.get("experiment_id"),
+        "universe_id": run.get("universe_id"),
+        **impact_summary(control, treatment),
+    }
+
+
+@app.get("/causal/graph")
+@app.get("/causal/dependency-graph")
+@app.get("/causal/graph/{run_id}")
+@app.get("/experiment-runs/{run_id}/causal-graph")
+def causal_dependency_graph(
+    request: Request,
+    run_id: str | None = None,
+    universe_id: Literal["prime", "echo"] = "prime",
+    branch: Literal["control", "treatment", "canonical"] = "canonical",
+) -> dict[str, Any]:
+    service = get_service(request)
+    if run_id:
+        run = service.store.get_experiment_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"unknown experiment run: {run_id}")
+        selected = _run_branch_state(run, branch if branch != "canonical" else "control")
+        if selected is None:
+            raise HTTPException(status_code=404, detail=f"branch history unavailable: {branch}")
+    else:
+        selected = service.universe(universe_id).state
+    effective_universe_id = str(run.get("universe_id")) if run_id and run else universe_id
+    return {
+        "run_id": run_id,
+        "universe_id": effective_universe_id,
+        "branch": branch if run_id else "canonical",
+        **causal_graph(selected),
+    }
+
+
 @app.get("/experiment-runs/{run_id}")
 @app.get("/experiments/runs/{run_id}")
 def get_experiment_run(run_id: str, request: Request) -> dict[str, Any]:
@@ -1127,14 +1226,9 @@ def run_catalog_experiment(payload: ExperimentRunRequest, request: Request) -> d
 
 
 def _earliest_divergence(control: SimulationState, treatment: SimulationState) -> dict[str, Any] | None:
-    """Find the first recorded event that differs between two actual branches."""
+    """Compatibility projection of the Phase 5 semantic comparison."""
 
-    for index, (left, right) in enumerate(zip(control.events, treatment.events)):
-        if left.model_dump(mode="json") != right.model_dump(mode="json"):
-            return {"event_index": index, "control": left.model_dump(mode="json"), "treatment": right.model_dump(mode="json")}
-    if len(control.events) != len(treatment.events):
-        return {"event_index": min(len(control.events), len(treatment.events)), "reason": "branch event counts diverged"}
-    return None
+    return compare_branches(control, treatment)["earliest_divergence"]
 
 
 @app.post("/experiments/side-by-side", response_model=ExperimentResult)

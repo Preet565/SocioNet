@@ -32,6 +32,7 @@ The trace contains execution facts and rule inputs. It does not claim to expose 
 - `simulation.py`: tick orchestration and lifecycle.
 - `interventions.py`: typed validation, immediate/delayed application, intervention history.
 - `experiments.py`: deep-copy fork from one snapshot and metric comparison.
+- `causality.py`: deterministic ancestry registry, ID-independent semantic branch comparison, impact summaries, and dependency-graph projections.
 - `analytics.py`: event-derived metrics, claim-specific metrics, and bounded history samples.
 - `persistence.py`: additive SQLite schema migration, provenance-filtered snapshots, durable experiment runs and batches, normalized metric/claim history, and JSON fallback.
 - `presentation.py`: read-only browser projections derived from state.
@@ -39,13 +40,13 @@ The trace contains execution facts and rule inputs. It does not claim to expose 
 
 ## Butterfly experiment
 
-`run_side_by_side()` deep-copies the exact input snapshot twice before applying any branch intervention. It then executes both simulations with the same seed and deterministic per-agent RNG derivation. The catalog demo applies the same false fictional seed post to both branches; Echo also gets true, high-credibility counterevidence at tick +2. The output includes calculated metrics and the first differing recorded event.
+`run_side_by_side()` deep-copies the exact input snapshot twice before applying any branch intervention. It then executes both simulations with the same seed and deterministic per-agent RNG derivation. The catalog demo applies the same false fictional seed post to both branches; Echo also gets true, high-credibility counterevidence at tick +2. The output includes calculated metrics, a semantic event comparison, citizen/claim/community impact summaries, and the first differing semantic position.
 
-Each API-created run first stores a tagged `experiment_source` snapshot, records `running` status, then stores `experiment_control` and `experiment_treatment` snapshots and updates the run to `completed`. Failed calculations remain as durable `failed` records. The catalog projection derives its status and last-run metadata from these records rather than process memory.
+Each API-created run first stores a tagged `experiment_source` snapshot, records `running` status, then stores `experiment_control` and `experiment_treatment` snapshots and updates the run to `completed`. Failed calculations remain as durable `failed` records. The catalog projection derives its status and last-run metadata from these records rather than process memory. Phase 5 artifacts are serialized inside the durable result and can also be recomputed from the saved branch state through the causal APIs.
 
 ## Claims and history
 
-Every claim-bearing origin content receives a stable `claim-{origin-content-id}` identifier. Replies, fact-checks, and counterevidence inherit the origin claim ID; branch forks therefore retain claim identity even when later content IDs diverge. A claim records its origin, source/intervention provenance, bounded content lineage, and lifecycle transitions (`active`, `disputed`, `confirmed`, or `corrected`). Old snapshots without these additive fields are accepted and hydrated when loaded.
+Every claim-bearing origin content receives a stable `claim-{origin-content-id}` identifier. Replies, fact-checks, and counterevidence inherit the origin claim ID; branch forks therefore retain claim identity even when later content IDs diverge. A claim records its origin, source/intervention provenance, bounded content lineage, and lifecycle transitions (`active`, `disputed`, `confirmed`, or `corrected`). Old snapshots without these additive fields are accepted and hydrated when loaded. Claim, content, exposure, decision, belief-update, action, and intervention records expose parent/provenance references; the registry turns them into deterministic `CausalLink` edges.
 
 `Simulation.step()` records one `MetricSample` after the complete tick in deterministic citizen-ID order. The initial frame is sample tick 0. Each state retains at most 200 recent samples. Durable experiment branches additionally write those samples to `metric_samples` and claim rows to `claim_metric_samples`, keyed by run, branch, and tick. This makes `/analytics/history` and `/experiment-runs/{run_id}/history` restart-safe without changing the legacy comparison response.
 
@@ -90,3 +91,11 @@ Each agent has a stable behavioral archetype key. `SimulationConfig.archetypes` 
 Observation and new tie formation use ideology, shared interests, shared communities, and the configured cross-community bridge probability. Existing ties decay toward the agent's trust baseline when not interacted with, and follows adopt or decay through keyed seeded draws. All candidate and output collections are processed in sorted ID order, and relationship/following counts are capped.
 
 Membership changes append `CommunityEvent` records with kinds `join`, `leave`, `split`, and `merge`. Threshold-based split/merge rules operate in stable community order and add one bounded `CommunityHistorySample` per tick. `NetworkHistorySample` stores the current ties and graph metrics per tick. Both histories are included in serialized snapshots and exposed through `/network/history` and `/communities/history`.
+
+## Phase 5 causal artifacts and perturbations
+
+`compare_branches()` aligns action events by `(tick, actor_id, semantic occurrence)` rather than list position. Event, content, claim, intervention, and snapshot IDs are omitted or normalized to semantic keys. If action streams are equivalent but a stateful intervention changes an unobserved target, the comparison reports that intervention-state divergence as a secondary semantic position. This preserves the earliest action divergence for participation suppressions while still making silent post or relationship changes visible.
+
+`impact_summary()` compares observable citizen activity/beliefs/relationships, claim propagation metrics, and community membership/event summaries. `causal_graph()` returns typed citizen, relationship, intervention, claim, content, exposure, decision, belief-update, and action nodes plus recorded links. The graph's edge label is always `modeled_dependency`; `statistical_causal_effects` is empty and the payload states `not statistically established effect`. A paired run describes this simulator's declared dependencies; it does not estimate a statistical causal effect.
+
+The `/perturbations` endpoint accepts exactly one immediate suppression intervention. Citizen suppression stops that citizen's lifecycle and outgoing relationship evolution while retaining existing state and incoming ties. Post suppression marks one existing top-level post unavailable to future observation. Relationship suppression removes and blocks one directional source-to-target tie, leaving the reverse direction independent. Target existence, post kind, distinct relationship endpoints, and unrelated perturbation fields are validated before either branch runs.

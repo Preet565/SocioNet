@@ -6,6 +6,19 @@ from dataclasses import dataclass
 
 from app.agents import TOPICS, create_citizens
 from app.analytics import MAX_CLAIM_PROVENANCE, graph_metrics_for_state, record_metric_sample
+from app.causality import (
+    action_ref,
+    append_causal_link,
+    belief_update_ref,
+    content_ref,
+    decision_ref,
+    ensure_causal_registry,
+    exposure_ref,
+    intervention_ref,
+    record_content_provenance,
+    semantic_content_key,
+    semantic_event_signature,
+)
 from app.beliefs import learn_from_content
 from app.communities import (
     create_communities,
@@ -19,11 +32,13 @@ from app.models import (
     ActionEvent,
     ActionKind,
     Agent,
+    BeliefUpdateEvent,
     Claim,
     ClaimLifecycleEvent,
     ClaimProvenanceRecord,
     ClaimStatus,
     Content,
+    ContentExposureEvent,
     ContentKind,
     CommunityEventKind,
     DecisionTrace,
@@ -52,6 +67,8 @@ class ActionResult:
     content_id: str | None = None
     topic: str | None = None
     details: str = ""
+    parent_event_ids: list[str] | None = None
+    provenance_event_ids: list[str] | None = None
 
 
 def create_initial_state(
@@ -74,6 +91,7 @@ def create_initial_state(
         config=config,
     )
     ensure_claim_registry(state)
+    ensure_causal_registry(state)
     sample = record_metric_sample(state)
     record_dynamic_history(
         state,
@@ -190,6 +208,7 @@ def _register_claim_content(
             parent_content_id=content.parent_id,
             source=source,
             intervention_id=intervention_id,
+            parent_event_ids=[*content.parent_event_ids, *content.provenance_event_ids],
         )
     )
     claim.provenance = claim.provenance[-MAX_CLAIM_PROVENANCE:]
@@ -242,6 +261,8 @@ def append_content(
     provenance: str = "organic",
     intervention_id: str | None = None,
     is_reshare: bool = False,
+    parent_event_ids: list[str] | None = None,
+    provenance_event_ids: list[str] | None = None,
 ) -> Content:
     content_id = f"content-{len(state.contents) + 1:06d}"
     parent = next((item for item in reversed(state.contents) if item.id == parent_id), None) if parent_id else None
@@ -263,6 +284,8 @@ def append_content(
         is_reshare=is_reshare,
         provenance=provenance,
         intervention_id=intervention_id,
+        parent_event_ids=parent_event_ids or [],
+        provenance_event_ids=provenance_event_ids or [],
     )
     state.contents.append(content)
     if resolved_claim_id is not None and claim_truth is not None:
@@ -273,6 +296,7 @@ def append_content(
             source=provenance,
             intervention_id=intervention_id,
         )
+    record_content_provenance(state, content)
     return content
 
 
@@ -287,6 +311,7 @@ class Simulation:
     ) -> None:
         self.state = state or create_initial_state(seed, config=config)
         ensure_claim_registry(self.state)
+        ensure_causal_registry(self.state)
         current_sample = next(
             (sample for sample in self.state.metric_history if sample.tick == self.state.tick),
             None,
@@ -310,6 +335,8 @@ class Simulation:
         self.state.tick += 1
         self._apply_due_interventions()
         for agent_id in sorted(self.state.agents):
+            if agent_id in self.state.suppressed_citizen_ids:
+                continue
             self._run_agent_lifecycle(self.state.agents[agent_id])
         evolve_relationships(
             self.state.seed,
@@ -317,6 +344,11 @@ class Simulation:
             self.state.agents,
             self.state.communities,
             self.state.config,
+            suppressed_relationships={
+                (item.source_agent_id, item.target_agent_id)
+                for item in self.state.suppressed_relationships
+            },
+            suppressed_agents=set(self.state.suppressed_citizen_ids),
         )
         evolve_communities(self.state)
         sample = record_metric_sample(self.state)
@@ -351,39 +383,46 @@ class Simulation:
     def _run_agent_lifecycle(self, agent: Agent) -> None:
         rng = rng_for(self.state.seed, "decision", self.state.tick, agent.id)
         content = self._observe(agent, rng)
-        self._trace(agent, LifecyclePhase.OBSERVE, content_id=content.id if content else None, details={
+        exposure = self._record_exposure(agent, content) if content else None
+        observe_trace = self._trace(agent, LifecyclePhase.OBSERVE, content_id=content.id if content else None, details={
             "visible": content is not None,
             "content_count": len(self.state.contents),
-        })
+        }, parent_event_ids=[exposure_ref(exposure.event_id)] if exposure else [], provenance_event_ids=content.provenance_event_ids if content else [])
 
         memories = retrieve(agent, content.topic if content else None, limit=5)
-        self._trace(agent, LifecyclePhase.RETRIEVE, content_id=content.id if content else None, details={
+        retrieve_trace = self._trace(agent, LifecyclePhase.RETRIEVE, content_id=content.id if content else None, details={
             "memory_ids": [memory.memory_id for memory in memories],
             "matched_topic": content.topic if content else None,
-        })
+        }, parent_event_ids=[decision_ref(observe_trace.trace_id)])
 
         action = self._form_intent(agent, content, rng)
-        self._trace(agent, LifecyclePhase.FORM_INTENT, action=action, content_id=content.id if content else None, details={
+        intent_trace = self._trace(agent, LifecyclePhase.FORM_INTENT, action=action, content_id=content.id if content else None, details={
             "candidate": action.value,
             "curiosity": agent.curiosity,
-        })
+        }, parent_event_ids=[decision_ref(retrieve_trace.trace_id)])
 
         evaluation = self._evaluate(agent, content, action)
-        self._trace(agent, LifecyclePhase.EVALUATE, action=action, content_id=content.id if content else None, details=evaluation)
+        evaluation_trace = self._trace(agent, LifecyclePhase.EVALUATE, action=action, content_id=content.id if content else None, details=evaluation, parent_event_ids=[decision_ref(intent_trace.trace_id)])
 
-        result = self._act(agent, content, action, rng)
-        self._trace(agent, LifecyclePhase.ACT, action=result.action, content_id=result.content_id, details={
+        prior_update = next((item for item in reversed(self.state.belief_updates) if item.agent_id == agent.id), None)
+        action_parents = [decision_ref(evaluation_trace.trace_id)]
+        if exposure:
+            action_parents.append(exposure_ref(exposure.event_id))
+        if prior_update:
+            action_parents.append(belief_update_ref(prior_update.update_id))
+        result = self._act(agent, content, action, rng, parent_event_ids=action_parents)
+        act_trace = self._trace(agent, LifecyclePhase.ACT, action=result.action, content_id=result.content_id, details={
             "target_id": result.target_id,
             "topic": result.topic,
             "result": result.details,
-        })
+        }, parent_event_ids=[decision_ref(evaluation_trace.trace_id)], provenance_event_ids=content.provenance_event_ids if content else [])
 
-        self._update(agent, content, result)
-        self._trace(agent, LifecyclePhase.UPDATE, action=result.action, content_id=result.content_id, details={
+        update = self._update(agent, content, result, parent_event_ids=[decision_ref(act_trace.trace_id), *([exposure_ref(exposure.event_id)] if exposure else [])])
+        update_trace = self._trace(agent, LifecyclePhase.UPDATE, action=result.action, content_id=result.content_id, details={
             "memory_count": len(agent.memories),
             "relationship_count": len(agent.relationships),
             "belief_topics": len(agent.beliefs),
-        })
+        }, parent_event_ids=[decision_ref(act_trace.trace_id), *([belief_update_ref(update.update_id)] if update else [])])
 
         agent.last_action = result.action
         agent.action_counts[result.action.value] = agent.action_counts.get(result.action.value, 0) + 1
@@ -398,12 +437,24 @@ class Simulation:
             claim_id=content.claim_id if content and content.claim_id else self._claim_id_for_result(result),
             topic=result.topic,
             details=result.details,
+            parent_event_ids=[*(result.parent_event_ids or []), decision_ref(act_trace.trace_id)],
+            provenance_event_ids=content.provenance_event_ids if content else [],
         )
+        event.semantic_key = f"action:{_semantic_digest(semantic_event_signature(event, self.state))}"
         self.state.events.append(event)
-        self._trace(agent, LifecyclePhase.RECORD, action=result.action, content_id=result.content_id, details={
+        for parent in event.parent_event_ids:
+            append_causal_link(self.state, parent, action_ref(event.event_id), "caused_action", tick=self.state.tick)
+        for parent in event.provenance_event_ids:
+            append_causal_link(self.state, parent, action_ref(event.event_id), "action_provenance", tick=self.state.tick)
+        if result.content_id:
+            append_causal_link(self.state, action_ref(event.event_id), content_ref(result.content_id), "created_content", tick=self.state.tick)
+        if update:
+            append_causal_link(self.state, action_ref(event.event_id), belief_update_ref(update.update_id), "updated_belief", tick=self.state.tick)
+        record_trace = self._trace(agent, LifecyclePhase.RECORD, action=result.action, content_id=result.content_id, details={
             "event_id": event.event_id,
             "recorded": True,
-        })
+        }, parent_event_ids=[action_ref(event.event_id), *([belief_update_ref(update.update_id)] if update else [])], provenance_event_ids=event.provenance_event_ids)
+        append_causal_link(self.state, action_ref(event.event_id), decision_ref(record_trace.trace_id), "recorded_as", tick=self.state.tick)
 
     def _claim_id_for_result(self, result: ActionResult) -> str | None:
         if result.content_id is None:
@@ -412,7 +463,14 @@ class Simulation:
         return created.claim_id if created else None
 
     def _observe(self, agent: Agent, rng) -> Content | None:
-        visible = [content for content in self.state.contents[-self.state.config.observation_window:] if content.author_id != agent.id]
+        visible = [
+            content
+            for content in self.state.contents[-self.state.config.observation_window:]
+            if content.author_id != agent.id
+            and not content.suppressed
+            and content.id not in self.state.suppressed_post_ids
+            and not self._relationship_suppressed(agent.id, content.author_id)
+        ]
         if not visible:
             return None
         related = [content for content in visible if content.topic in agent.interests]
@@ -431,6 +489,38 @@ class Simulation:
                 accessible.append(candidate)
         pool = [candidate for candidate in related if candidate in accessible] or accessible or related or visible
         return pool[rng.randrange(len(pool))]
+
+    def _relationship_suppressed(self, source_agent_id: str, target_agent_id: str) -> bool:
+        return any(
+            item.source_agent_id == source_agent_id and item.target_agent_id == target_agent_id
+            for item in self.state.suppressed_relationships
+        )
+
+    def _record_exposure(self, agent: Agent, content: Content):
+        ordinal = sum(
+            1
+            for item in self.state.content_exposures
+            if item.tick == self.state.tick and item.actor_id == agent.id
+        )
+        exposure_id = f"exposure-{self.state.tick:04d}-{agent.id}-{ordinal:02d}"
+        content_by_id = {item.id: item for item in self.state.contents}
+        exposure = ContentExposureEvent(
+            event_id=exposure_id,
+            semantic_key=f"exposure:{self.state.tick}:{agent.id}:{semantic_content_key(content, content_by_id)}",
+            tick=self.state.tick,
+            actor_id=agent.id,
+            content_id=content.id,
+            claim_id=content.claim_id,
+            topic=content.topic,
+            parent_event_ids=[content_ref(content.id), *content.parent_event_ids],
+            provenance_event_ids=content.provenance_event_ids,
+        )
+        self.state.content_exposures.append(exposure)
+        for parent in exposure.parent_event_ids:
+            append_causal_link(self.state, parent, exposure_ref(exposure.event_id), "content_exposed", tick=self.state.tick)
+        for parent in content.provenance_event_ids:
+            append_causal_link(self.state, parent, exposure_ref(exposure.event_id), "exposure_provenance", tick=self.state.tick)
+        return exposure
 
     def _form_intent(self, agent: Agent, content: Content | None, rng) -> ActionKind:
         behavior = self.state.config.archetypes.get(
@@ -477,7 +567,7 @@ class Simulation:
             "selected_action": action.value,
         }
 
-    def _act(self, agent: Agent, content: Content | None, action: ActionKind, rng) -> ActionResult:
+    def _act(self, agent: Agent, content: Content | None, action: ActionKind, rng, *, parent_event_ids: list[str]) -> ActionResult:
         if action is ActionKind.POST:
             topic = agent.interests[rng.randrange(len(agent.interests))]
             truth = rng.random() >= 0.22
@@ -489,6 +579,7 @@ class Simulation:
                 text=f"{agent.name} shares a fictional observation about {topic}.",
                 claim_truth=truth,
                 credibility=0.48 + agent.trust_baseline * 0.35,
+                parent_event_ids=parent_event_ids,
             )
             return ActionResult(ActionKind.POST, content_id=created.id, topic=topic, details="published a fictional post")
         if content is None:
@@ -505,6 +596,7 @@ class Simulation:
                 parent_id=content.id,
                 credibility=0.42 + agent.trust_baseline * 0.3,
                 is_reshare=content.claim_id is not None,
+                parent_event_ids=[*parent_event_ids, content_ref(content.id)],
             )
             content.likes += 1
             return ActionResult(ActionKind.REPLY, target_id=target_id, content_id=created.id, topic=content.topic, details="replied to content")
@@ -520,6 +612,7 @@ class Simulation:
                 claim_truth=content.claim_truth,
                 parent_id=content.id,
                 credibility=0.9,
+                parent_event_ids=[*parent_event_ids, content_ref(content.id)],
             )
             return ActionResult(ActionKind.FACT_CHECK, target_id=target_id, content_id=created.id, topic=content.topic, details="recorded a fact-check")
         if action is ActionKind.FOLLOW:
@@ -570,13 +663,43 @@ class Simulation:
         candidates.sort(key=lambda item: item.id)
         return candidates[-1] if candidates else None
 
-    def _update(self, agent: Agent, content: Content | None, result: ActionResult) -> None:
+    def _update(self, agent: Agent, content: Content | None, result: ActionResult, *, parent_event_ids: list[str]) -> object | None:
+        update = None
         if content is not None:
+            previous = agent.beliefs.get(content.topic)
+            prior_stance = previous.stance if previous else None
+            prior_confidence = previous.confidence if previous else None
             relationship = agent.relationships.get(content.author_id)
             trust = relationship.trust if relationship else agent.trust_baseline
             learn_from_content(agent, content, trust=trust, skepticism=agent.skepticism)
+            belief = agent.beliefs.get(content.topic)
+            if belief is not None:
+                update = BeliefUpdateEvent(
+                    update_id=f"belief-update-{self.state.tick:04d}-{agent.id}-{content.topic.replace(' ', '-')}",
+                    semantic_key=f"belief:{self.state.tick}:{agent.id}:{content.topic}",
+                    tick=self.state.tick,
+                    agent_id=agent.id,
+                    topic=content.topic,
+                    content_id=content.id,
+                    claim_id=content.claim_id,
+                    prior_stance=prior_stance,
+                    prior_confidence=prior_confidence,
+                    stance=belief.stance,
+                    confidence=belief.confidence,
+                    evidence_for=belief.evidence_for,
+                    evidence_against=belief.evidence_against,
+                    parent_event_ids=parent_event_ids,
+                    provenance_event_ids=content.provenance_event_ids,
+                )
+                self.state.belief_updates.append(update)
+                for parent in parent_event_ids:
+                    append_causal_link(self.state, parent, belief_update_ref(update.update_id), "informed_belief_update", tick=self.state.tick)
             positive = result.action in {ActionKind.REPLY, ActionKind.FOLLOW, ActionKind.FACT_CHECK}
-            if result.action is not ActionKind.POST and content.author_id != agent.id:
+            if (
+                result.action is not ActionKind.POST
+                and content.author_id != agent.id
+                and not self._relationship_suppressed(agent.id, content.author_id)
+            ):
                 record_interaction(agent, content.author_id, positive=positive, tick=self.state.tick)
             remember(
                 agent,
@@ -600,6 +723,7 @@ class Simulation:
                 valence=0.2,
                 limit=self.state.config.memory_limit,
             )
+        return update
 
     def _trace(
         self,
@@ -609,9 +733,11 @@ class Simulation:
         action: ActionKind | None = None,
         content_id: str | None = None,
         details: dict[str, object],
-    ) -> None:
-        self.state.traces.append(
-            DecisionTrace(
+        parent_event_ids: list[str] | None = None,
+        provenance_event_ids: list[str] | None = None,
+    ) -> DecisionTrace:
+        content = next((item for item in reversed(self.state.contents) if item.id == content_id), None) if content_id else None
+        trace = DecisionTrace(
                 trace_id=f"trace-{self.state.tick:04d}-{agent.id}-{phase.value.lower().replace(' ', '-')}",
                 tick=self.state.tick,
                 agent_id=agent.id,
@@ -619,8 +745,22 @@ class Simulation:
                 action=action,
                 content_id=content_id,
                 details=details,
+                semantic_key=f"decision:{self.state.tick}:{agent.id}:{phase.value}:{action.value if action else ''}:{semantic_content_key(content, {item.id: item for item in self.state.contents}) if content else ''}",
+                parent_event_ids=parent_event_ids or [],
+                provenance_event_ids=provenance_event_ids or [],
             )
-        )
+        self.state.traces.append(trace)
+        for parent in trace.parent_event_ids:
+            append_causal_link(self.state, parent, decision_ref(trace.trace_id), "decision_dependency", tick=self.state.tick)
+        for parent in trace.provenance_event_ids:
+            append_causal_link(self.state, parent, decision_ref(trace.trace_id), "decision_provenance", tick=self.state.tick)
+        return trace
+
+
+def _semantic_digest(value: object) -> str:
+    import hashlib
+
+    return hashlib.sha256(repr(value).encode("utf-8")).hexdigest()[:16]
 
 
 def run_seeded(seed: int, ticks: int = 1) -> SimulationState:

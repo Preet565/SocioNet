@@ -316,8 +316,99 @@ export interface ExperimentComparison {
   treatment_metrics: ExperimentMetricSnapshot
   metric_deltas: Record<string, number>
   earliest_divergence: Record<string, unknown> | null
+  branch_comparison?: BranchComparison
+  impact_summary?: ImpactSummary
   run_id?: string
   status?: string
+}
+
+export interface CausalEvidence {
+  modeled_dependency_label: string
+  statistical_effect_label: string
+  description: string
+}
+
+export interface BranchComparison {
+  comparison_type: string
+  equivalence: 'identical' | 'diverged'
+  control_event_count: number
+  treatment_event_count: number
+  matched_event_count: number
+  divergence_count: number
+  divergent_event_count?: number
+  earliest_divergence: Record<string, unknown> | null
+  id_policy: string
+  evidence: CausalEvidence
+}
+
+export interface CitizenImpactSummary {
+  citizen_id: string
+  control: Record<string, unknown>
+  treatment: Record<string, unknown>
+  delta: Record<string, number>
+  changed: boolean
+  evidence: CausalEvidence
+}
+
+export interface ClaimImpactSummary {
+  claim_id: string
+  semantic_claim_id?: string
+  control_claim_id?: string
+  treatment_claim_id?: string
+  control: Record<string, unknown>
+  treatment: Record<string, unknown>
+  delta: Record<string, number>
+  changed: boolean
+  evidence: CausalEvidence
+}
+
+export interface CommunityImpactSummary {
+  community_id: string
+  control: Record<string, unknown>
+  treatment: Record<string, unknown>
+  delta: Record<string, number>
+  changed: boolean
+  evidence: CausalEvidence
+}
+
+export interface ImpactSummary {
+  summary_type: string
+  evidence: CausalEvidence
+  citizens: CitizenImpactSummary[]
+  claims: ClaimImpactSummary[]
+  communities: CommunityImpactSummary[]
+  changed_citizen_count: number
+  changed_claim_count: number
+  changed_community_count: number
+}
+
+export interface CausalGraphNode {
+  node_id: string
+  node_type: string
+  tick: number
+  semantic_key?: string | null
+  [key: string]: unknown
+}
+
+export interface CausalGraphEdge {
+  link_id: string
+  parent_event_id: string
+  child_event_id: string
+  relation: string
+  tick: number
+  label: 'modeled_dependency' | 'statistically_established_effect'
+  provenance: string
+  details: string
+}
+
+export interface CausalGraph {
+  graph_type: string
+  evidence: CausalEvidence
+  statistical_causal_effects: unknown[]
+  nodes: CausalGraphNode[]
+  edges: CausalGraphEdge[]
+  node_count: number
+  edge_count: number
 }
 
 export type ExperimentRunStatus = 'created' | 'running' | 'completed' | 'failed'

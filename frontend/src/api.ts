@@ -13,6 +13,14 @@ import type {
   ExperimentRun,
   ExperimentMetricSnapshot,
   ClaimRecord,
+  BranchComparison,
+  CausalGraph,
+  CausalGraphEdge,
+  CausalEvidence,
+  ImpactSummary,
+  CitizenImpactSummary,
+  ClaimImpactSummary,
+  CommunityImpactSummary,
   MetricHistorySample,
   SnapshotProvenance,
   HealthResponse,
@@ -202,8 +210,90 @@ const normalizeComparison = (value: unknown): ExperimentComparison => {
     treatment_metrics: normalizeMetricSnapshot(pick(record, ['treatment_metrics', 'treatmentMetrics'])),
     metric_deltas: (asRecord(pick(record, ['metric_deltas', 'metricDeltas'])) ?? {}) as Record<string, number>,
     earliest_divergence: (asRecord(pick(record, ['earliest_divergence', 'earliestDivergence'])) ?? null) as Record<string, unknown> | null,
+    branch_comparison: asRecord(pick(record, ['branch_comparison', 'branchComparison'])) ? normalizeBranchComparison(pick(record, ['branch_comparison', 'branchComparison'])) : undefined,
+    impact_summary: asRecord(pick(record, ['impact_summary', 'impactSummary'])) ? normalizeImpactSummary(pick(record, ['impact_summary', 'impactSummary'])) : undefined,
     run_id: typeof pick(record, ['run_id', 'runId']) === 'string' ? pick(record, ['run_id', 'runId']) as string : undefined,
     status: typeof pick(record, ['status']) === 'string' ? pick(record, ['status']) as string : undefined,
+  }
+}
+
+const normalizeEvidence = (value: unknown): CausalEvidence => {
+  const record = asRecord(value) ?? {}
+  return {
+    modeled_dependency_label: stringOr(pick(record, ['modeled_dependency_label', 'label']), 'modeled dependency'),
+    statistical_effect_label: stringOr(pick(record, ['statistical_effect_label', 'statistical_label']), 'not statistically established effect'),
+    description: stringOr(pick(record, ['description']), 'Recorded links describe simulator dependencies; they are not statistical causal effects.'),
+  }
+}
+
+const normalizeBranchComparison = (value: unknown): BranchComparison => {
+  const record = asRecord(value) ?? {}
+  const equivalence = pick(record, ['equivalence']) === 'diverged' ? 'diverged' : 'identical'
+  return {
+    comparison_type: stringOr(pick(record, ['comparison_type']), 'semantic_event_comparison'),
+    equivalence,
+    control_event_count: numberOr(pick(record, ['control_event_count']), 0),
+    treatment_event_count: numberOr(pick(record, ['treatment_event_count']), 0),
+    matched_event_count: numberOr(pick(record, ['matched_event_count']), 0),
+    divergence_count: numberOr(pick(record, ['divergence_count']), 0),
+    divergent_event_count: numberOr(pick(record, ['divergent_event_count']), 0),
+    earliest_divergence: (asRecord(pick(record, ['earliest_divergence'])) ?? null) as Record<string, unknown> | null,
+    id_policy: stringOr(pick(record, ['id_policy']), 'Generated IDs are excluded from semantic equality.'),
+    evidence: normalizeEvidence(pick(record, ['evidence'])),
+  }
+}
+
+const normalizeImpactRow = <T>(value: unknown): T => {
+  const record = asRecord(value) ?? {}
+  return {
+    ...record,
+    control: asRecord(record.control) ?? {},
+    treatment: asRecord(record.treatment) ?? {},
+    delta: (asRecord(record.delta) ?? {}) as Record<string, number>,
+    changed: Boolean(record.changed),
+    evidence: normalizeEvidence(record.evidence),
+  } as T
+}
+
+const normalizeImpactSummary = (value: unknown): ImpactSummary => {
+  const record = asRecord(value) ?? {}
+  return {
+    summary_type: stringOr(pick(record, ['summary_type']), 'branch_impact_summary'),
+    evidence: normalizeEvidence(record.evidence),
+    citizens: arrayOr(record.citizens).map((item) => normalizeImpactRow<CitizenImpactSummary>(item)),
+    claims: arrayOr(record.claims).map((item) => normalizeImpactRow<ClaimImpactSummary>(item)),
+    communities: arrayOr(record.communities).map((item) => normalizeImpactRow<CommunityImpactSummary>(item)),
+    changed_citizen_count: numberOr(pick(record, ['changed_citizen_count']), 0),
+    changed_claim_count: numberOr(pick(record, ['changed_claim_count']), 0),
+    changed_community_count: numberOr(pick(record, ['changed_community_count']), 0),
+  }
+}
+
+const normalizeCausalGraph = (value: unknown): CausalGraph => {
+  const record = asRecord(value) ?? {}
+  const rawEdges = arrayOr(record.edges)
+  const edges: CausalGraphEdge[] = rawEdges.map((item) => {
+    const edge = asRecord(item) ?? {}
+    const label = pick(edge, ['label']) === 'statistically_established_effect' ? 'statistically_established_effect' : 'modeled_dependency'
+    return {
+      link_id: stringOr(pick(edge, ['link_id']), 'link'),
+      parent_event_id: stringOr(pick(edge, ['parent_event_id']), 'unknown-parent'),
+      child_event_id: stringOr(pick(edge, ['child_event_id']), 'unknown-child'),
+      relation: stringOr(pick(edge, ['relation']), 'dependency'),
+      tick: numberOr(pick(edge, ['tick']), 0),
+      label,
+      provenance: stringOr(pick(edge, ['provenance']), 'simulator_rule'),
+      details: stringOr(pick(edge, ['details']), ''),
+    }
+  })
+  return {
+    graph_type: stringOr(pick(record, ['graph_type']), 'recorded_causal_dependency_graph'),
+    evidence: normalizeEvidence(record.evidence),
+    statistical_causal_effects: arrayOr(record.statistical_causal_effects),
+    nodes: arrayOr(record.nodes).map((item) => (asRecord(item) ?? {}) as CausalGraph['nodes'][number]),
+    edges,
+    node_count: numberOr(pick(record, ['node_count']), 0),
+    edge_count: numberOr(pick(record, ['edge_count']), edges.length),
   }
 }
 
@@ -588,6 +678,12 @@ export const api = {
     if (options.limit !== undefined) params.set('limit', String(options.limit))
     const query = params.toString() ? `?${params.toString()}` : ''
     return normalizeExperimentHistory(await request<unknown>(`/experiment-runs/${encodeURIComponent(runId)}/history${query}`))
+  },
+  getBranchComparison: async (runId: string) => normalizeBranchComparison(await request<unknown>(`/causal/branch-comparison/${encodeURIComponent(runId)}`)),
+  getImpactSummary: async (runId: string) => normalizeImpactSummary(await request<unknown>(`/causal/impact-summary/${encodeURIComponent(runId)}`)),
+  getCausalGraph: async (runId: string, branch: 'control' | 'treatment' = 'treatment') => {
+    const payload = await request<unknown>(`/causal/graph/${encodeURIComponent(runId)}?branch=${branch}`)
+    return normalizeCausalGraph(payload)
   },
   getAnalyticsHistory: async (universeId: UniverseId, options: { runId?: string; branch?: 'canonical' | 'control' | 'treatment'; fromTick?: number; toTick?: number; limit?: number } = {}) => {
     const params = new URLSearchParams({ universe_id: universeId })

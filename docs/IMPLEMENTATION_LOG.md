@@ -134,3 +134,35 @@ The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it
 - Community split/merge rules are deterministic threshold rules over ideology means and shared topics, not a general community-detection algorithm. At most one split and one merge are applied per tick.
 - Dynamic histories are bounded by `SimulationConfig.history_limit` (5–200) and are stored in snapshots/API projections; they are not normalized into separate persistence tables.
 - The initial graph is directed in agent state and browser edges, while degree/betweenness intentionally use its undirected social-topology projection. These are synthetic measures for the fictional simulator.
+
+## Phase 5 — claim provenance and causal divergence explorer
+
+### Implemented
+
+- Added deterministic ancestry fields and registry links across claim provenance, content parents, content exposures, decision traces, belief updates, action events, and interventions. Old snapshots hydrate these additive records idempotently.
+- Added semantic content and claim keys and branch comparison aligned by tick, citizen, and semantic occurrence. Generated event/content/claim/intervention/snapshot IDs are excluded from equality; silent stateful intervention differences are still surfaced when no action event diverges.
+- Added citizen, claim, and community branch impact summaries with stable deltas and explicit evidence labels.
+- Added typed causal dependency graph projections and aliases for canonical and durable control/treatment branches. Graph payloads distinguish simulator-declared **modeled dependency** links from **not statistically established effect** claims.
+- Added immediate single-variable perturbation validation and deterministic effects for `suppress_citizen`, `suppress_post`, and directional `suppress_relationship`.
+- Added additive causal payloads to the legacy experiment response, durable causal artifact endpoints, and the Butterfly Lab divergence explorer with impact counts, earliest semantic divergence, dependency-edge preview, and evidence note.
+- Preserved legacy state loading and experiment fields while adding Phase 5 fields with Pydantic defaults.
+
+### Verification
+
+Commands run:
+
+```text
+python3 -m pytest tests/test_phase5.py       # 9 passed
+make test                                    # 50 backend tests passed; frontend typecheck/build passed
+cd frontend && npm run typecheck             # passed
+cd frontend && npm run build                 # passed
+git diff --check                             # passed
+```
+
+The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it does not fail the suite.
+
+### Known limitations
+
+- The ancestry graph records deterministic simulator dependencies; it does not estimate statistical causal effects or make claims about real populations.
+- Citizen suppression leaves prior content and incoming ties in place; post suppression targets one existing top-level post; relationship suppression is directional.
+- Impact summaries are calculated from the saved paired branch states and bounded event histories. They do not reconstruct passive reach or historical records that were never persisted.

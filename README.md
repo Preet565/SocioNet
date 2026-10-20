@@ -16,8 +16,10 @@ NPC Internet is a local, deterministic civilization simulator. One hundred ficti
 - Per-tick metric history with bounded durable branch samples and deterministic tick ordering.
 - Bounded serial multi-seed batches with deterministic paired seeds, durable child runs, progress metadata, descriptive statistics, distribution-free median intervals, paired effect sizes, and explicit objective success rates.
 - First-class stable claim IDs, claim lifecycle/provenance, and claim-specific exposure, reshare, reply, fact-check, and correction metrics.
+- Deterministic claim, content, exposure, decision, belief-update, action, and intervention ancestry links; semantic branch comparison independent of generated IDs; citizen/claim/community impact summaries; and a typed causal dependency graph.
+- Explicit single-variable perturbations for suppressing a citizen, top-level post, or directional relationship, with target validation and deterministic branch effects. Causal records are labelled **modeled dependency** and are explicitly not statistical causal effects.
 - FastAPI projections for overview, graph, citizens, feed, event stream, interventions, minds, metrics, export, and experiments.
-- Butterfly Lab catalog with the **One rumor, two universes** scenario: a false fictional civic-event claim is run against a delayed credible counterevidence branch from the same snapshot.
+- Butterfly Lab catalog with the **One rumor, two universes** scenario: a false fictional civic-event claim is run against a delayed credible counterevidence branch from the same snapshot, then exposes semantic divergence, impact counts, and ancestry edges.
 - Dark, responsive React command center with actual API-driven SVG topology, profiles, feed, trace explorer, metrics, and comparison readouts.
 - Clearly labelled offline preview when the API cannot be reached. Preview data is not presented as a simulation result.
 
@@ -86,7 +88,7 @@ cd frontend && npm run build
 1. Start both services and open the dashboard.
 2. Select **Civilization Overview** and click **Reset both / run demo flow** or the prominent **Run the demo flow** button.
 3. The UI resets Prime and Echo, advances the synchronized starting frame, and requests the backend's `rumor-counterevidence` experiment.
-4. Open **Butterfly Lab**. The result card shows the actual seed, branch tick count, calculated metric deltas, earliest recorded divergence, and an interactive chart backed by persisted control/treatment samples. Before the run, no result is shown.
+4. Open **Butterfly Lab**. The result card shows the actual seed, branch tick count, calculated metric deltas, earliest semantic divergence, and an interactive chart backed by persisted control/treatment samples. The **Semantic divergence & causal ancestry** explorer shows changed citizens, claims, and communities plus recorded dependency edges. Before the run, no result is shown.
 5. Use **One rumor, two universes → Run experiment** to rerun it. The scenario forks an identical serialized snapshot; control gets only the unverified fictional claim while treatment receives credible counterevidence after two ticks. The durable run history shows the source and branch snapshot tags and provides an export link.
 6. Open **Information Ecosystem** to inspect actual posts, claim status, credibility, exposure counts, and the event stream. Open **Social Universe** to see graph nodes and relationship edges derived from the state.
 7. Select a citizen in **Citizen Observatory** for beliefs, memories, relationships, interests, recent decisions, and the executed trace. **Agent Mind Explorer** exposes structured decision evidence, not fabricated hidden chain-of-thought.
@@ -112,7 +114,22 @@ curl -X POST http://127.0.0.1:8000/experiment-runs \
 curl 'http://127.0.0.1:8000/experiment-runs?universe_id=prime'
 curl http://127.0.0.1:8000/experiment-runs/<run-id>
 curl -OJ http://127.0.0.1:8000/experiment-runs/<run-id>/export
+
+# Inspect semantic divergence, impact summaries, and a branch dependency graph
+curl http://127.0.0.1:8000/causal/branch-comparison/<run-id>
+curl http://127.0.0.1:8000/causal/impact-summary/<run-id>
+curl 'http://127.0.0.1:8000/causal/graph/<run-id>?branch=treatment'
 ```
+
+Single-variable perturbations fork the selected universe without changing the control arm. The supported targets are a citizen, an existing top-level post, or a directional relationship:
+
+```sh
+curl -X POST http://127.0.0.1:8000/perturbations \
+  -H 'content-type: application/json' \
+  -d '{"universe_id":"prime","ticks":4,"perturbation":{"kind":"suppress_citizen","agent_id":"citizen-001"}}'
+```
+
+`suppress_citizen` stops that citizen's lifecycle and outgoing relationship evolution after the source tick while retaining existing state and incoming ties. `suppress_post` marks the referenced top-level post unavailable to future observation. `suppress_relationship` removes and blocks only the directed source-to-target tie; the reverse direction is independent. These perturbations reject unrelated parameters and apply immediately at the source tick.
 
 Run a bounded multi-seed batch. The API executes repetitions serially and returns the durable batch record after each paired control/treatment run has been persisted:
 
@@ -162,6 +179,7 @@ curl -X POST http://127.0.0.1:8000/reset \
 - `GET /experiment-runs/{run_id}/history` (also `/experiments/runs/{run_id}/history`) for persisted control/treatment time series
 - `POST /experiment-batches` (also `/experiments/batches`) for validated paired multi-seed execution; `GET` collection, `/{batch_id}`, `/{batch_id}/progress` (also `/status`), and `/{batch_id}/runs` return durable metadata, aggregate results, progress, and linked child runs
 - `POST /interventions`
+- `POST /perturbations` (also `/causal/perturbations`) for one immediate suppression perturbation; `GET /causal/branch-comparison/{run_id}`, `GET /causal/impact-summary/{run_id}`, and `GET /causal/graph/{run_id}` expose Phase 5 artifacts, with canonical graph aliases
 - `GET /traces`, `GET /export/json`
 - `POST /state/save`, `POST /state/load`
 
@@ -203,3 +221,5 @@ Open <http://127.0.0.1:8080>. If Docker Desktop is not running, use the local co
 - Metrics are synthetic measurements of a fictional population and must not be interpreted as evidence about real people or communities.
 - Phase 4 betweenness is recalculated synchronously with the Brandes O(VE) algorithm over an unweighted undirected projection of directed ties; it is bounded by configured population and relationship caps but is not incremental or cached.
 - Phase 4 community split/merge behavior is a deterministic threshold rule over ideology means and shared topics, with at most one split and one merge per tick. Dynamic topology/community histories are retained in state snapshots and bounded to 5–200 samples by configuration rather than normalized into separate persistence tables.
+- Phase 5 ancestry is a recorded dependency graph generated by simulator rules. It explains the model's execution and paired branch differences, but it is not a statistical causal graph and does not establish effects about real populations. Branch comparison ignores generated event/content/claim/intervention/snapshot IDs and compares semantic action positions by tick and citizen.
+- Phase 5 suppression is intentionally narrow: citizen suppression disables future participation, post suppression disables future observation of one existing top-level post, and relationship suppression is directional. It does not delete historical content, rewrite prior events, or infer passive audience reach.

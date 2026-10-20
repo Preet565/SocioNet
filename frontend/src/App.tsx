@@ -4,11 +4,14 @@ import { buildFallbackState, getFallbackCitizen } from './data'
 import { Icon, type IconName } from './icons'
 import type {
   Citizen,
+  BranchComparison,
+  CausalGraph,
   ExperimentBatch,
   Experiment,
   ExperimentComparison,
   ExperimentHistory,
   ExperimentRun,
+  ImpactSummary,
   InterventionRecord,
   NetworkNode,
   SelectedCitizen,
@@ -238,13 +241,14 @@ function HygieneRow({ index, title, text }: { index: string; title: string; text
   return <div className="hygiene-row"><span>{index}</span><div><strong>{title}</strong><p>{text}</p></div></div>
 }
 
-function ButterflyLabView({ state, otherState, comparison, history, experimentHistory, batches, runningId, batchRunningId, onRun, onRunBatch }: { state: UniverseState; otherState: UniverseState; comparison?: ExperimentComparison; history: ExperimentRun[]; experimentHistory?: ExperimentHistory; batches: ExperimentBatch[]; runningId?: string; batchRunningId?: string; onRun: (experiment: Experiment) => void; onRunBatch: (experiment: Experiment) => void }) {
+function ButterflyLabView({ state, otherState, comparison, causalComparison, impactSummary, causalGraph, history, experimentHistory, batches, runningId, batchRunningId, onRun, onRunBatch }: { state: UniverseState; otherState: UniverseState; comparison?: ExperimentComparison; causalComparison?: BranchComparison; impactSummary?: ImpactSummary; causalGraph?: CausalGraph; history: ExperimentRun[]; experimentHistory?: ExperimentHistory; batches: ExperimentBatch[]; runningId?: string; batchRunningId?: string; onRun: (experiment: Experiment) => void; onRunBatch: (experiment: Experiment) => void }) {
   return <>
     <SectionHeader eyebrow="Counterfactuals / controlled change" title="Butterfly Lab" description="Run the same question against the current universe and record what moves." action={<StatusPill tone="violet"><Icon name="flask" size={13} /> reproducible experiments</StatusPill>} />
     <section className="panel lab-intro"><div className="lab-intro__mark"><Icon name="spark" size={23} /></div><div><span className="eyebrow">Method note</span><h3>A good experiment changes one thing you can name.</h3><p>Every run is attached to a universe, a tick, and an explicit set of variables. Use the two-universe demo to establish a shared starting frame before comparing outcomes.</p></div><div className="lab-intro__tick"><span>Selected tick</span><strong>{formatNumber(state.tick)}</strong></div></section>
     <section className="lab-compare" aria-label="Side-by-side universe comparison"><UniverseCompareCard label="Prime / control" tone="violet" state={state} /><div className="compare-divider"><span>Δ</span><small>branch</small></div><UniverseCompareCard label="Echo / counterfactual" tone="teal" state={otherState} /></section>
-     {comparison && <ComparisonResult comparison={comparison} />}
-     {experimentHistory && <HistoryComparisonChart history={experimentHistory} />}
+      {comparison && <ComparisonResult comparison={comparison} />}
+      {(causalComparison || impactSummary || causalGraph) && <CausalExplorer comparison={causalComparison} impactSummary={impactSummary} graph={causalGraph} />}
+      {experimentHistory && <HistoryComparisonChart history={experimentHistory} />}
      <div className="experiment-grid">{state.experiments.length ? state.experiments.map((experiment) => <ExperimentCard key={experiment.id} experiment={experiment} running={runningId === experiment.id} batchRunning={batchRunningId === experiment.id} onRun={() => onRun(experiment)} onBatch={() => onRunBatch(experiment)} />) : <EmptyState title="No experiments registered" body="The API returned no scenarios for this universe." />}</div>
       <BatchHistory batches={batches} />
       <section className="panel experiment-history"><PanelHeader title="Durable run history" subtitle="Every completed run keeps its source and branch snapshot provenance." action={<StatusPill tone="neutral">{history.length} saved</StatusPill>} />{history.length ? <div className="run-history-list">{history.slice(0, 8).map((run) => <article className="run-history-row" key={run.runId}><div className="run-history-row__main"><StatusPill tone={run.status === 'completed' ? 'green' : run.status === 'failed' ? 'red' : 'amber'}>{run.status}</StatusPill><div><strong>{run.experimentId.replaceAll('-', ' ')}</strong><span>run {run.runId.slice(0, 10)} · {formatDateTime(run.updatedAt)}</span></div></div><div className="run-history-row__provenance"><span>Source {run.sourceSnapshot ? `#${run.sourceSnapshot.snapshotId} · tick ${run.sourceSnapshot.tick}` : 'unavailable'}</span><span>Branches {run.controlSnapshot ? `#${run.controlSnapshot.snapshotId}` : '—'} / {run.treatmentSnapshot ? `#${run.treatmentSnapshot.snapshotId}` : '—'}</span></div><a className="text-button" href={api.experimentRunExportUrl(run.runId)} target="_blank" rel="noreferrer">Export <Icon name="arrow" size={13} /></a></article>)}</div> : <EmptyState title="No durable runs yet" body="Run a catalog experiment to create a history entry with source, control, and treatment snapshot tags." />}</section>
@@ -260,6 +264,32 @@ function ComparisonResult({ comparison }: { comparison: ExperimentComparison }) 
   const delta = (name: string) => comparison.metric_deltas[name] ?? 0
   const signed = (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(3)}`
   return <section className="panel comparison-result"><div><span className="eyebrow">Measured branch result</span><h3>{comparison.experiment_id.replaceAll('-', ' ')}</h3><p>Same seed <b>{comparison.seed}</b> · {comparison.ticks} ticks · calculated from recorded events. No outcome was prewritten.</p></div><div className="comparison-metrics"><div><span>Belief confidence Δ</span><strong>{signed(delta('average_belief_confidence'))}</strong></div><div><span>Trust Δ</span><strong>{signed(delta('average_relationship_trust'))}</strong></div><div><span>Fact-checks Δ</span><strong>{signed(delta('fact_checks'))}</strong></div><div><span>Polarization Δ</span><strong>{signed(delta('polarization'))}</strong></div></div><div className="comparison-footnote"><Icon name="activity" size={14} /> {comparison.earliest_divergence ? `Earliest divergence at recorded event ${String(comparison.earliest_divergence.event_index ?? '—')}.` : 'No divergence recorded in this run.'}</div></section>
+}
+
+function CausalExplorer({ comparison, impactSummary, graph }: { comparison?: BranchComparison; impactSummary?: ImpactSummary; graph?: CausalGraph }) {
+  const divergence = comparison?.earliest_divergence
+  const position = divergence && typeof divergence.semantic_position === 'object' && divergence.semantic_position !== null
+    ? divergence.semantic_position as Record<string, unknown>
+    : undefined
+  const control = divergence && typeof divergence.control === 'object' && divergence.control !== null
+    ? divergence.control as Record<string, unknown>
+    : undefined
+  const treatment = divergence && typeof divergence.treatment === 'object' && divergence.treatment !== null
+    ? divergence.treatment as Record<string, unknown>
+    : undefined
+  const edgePreview = graph?.edges.slice(0, 7) || []
+  return <section className="panel causal-explorer">
+    <PanelHeader title="Semantic divergence & causal ancestry" subtitle="Recorded dependencies from the selected durable run" action={comparison ? <StatusPill tone={comparison.equivalence === 'diverged' ? 'amber' : 'green'}>{comparison.equivalence}</StatusPill> : undefined} />
+    <div className="causal-explorer__body">
+      <div className="causal-explorer__summary">
+        <div className="causal-status"><span className="eyebrow">Earliest semantic divergence</span>{comparison?.equivalence === 'identical' ? <strong>No divergence</strong> : position ? <><strong>Tick {String(position.tick ?? '—')}</strong><span>event {String(divergence?.event_index ?? '—')} · {String(divergence?.reason ?? 'semantic fields differ')}</span></> : <strong>Awaiting comparison</strong>}</div>
+        <div className="causal-actors"><span className="eyebrow">Branch evidence</span>{control && treatment ? <><div><span>Control</span><strong>{String(control.action ?? 'event')} · {String(control.actor_id ?? 'unknown citizen')}</strong></div><div><span>Treatment</span><strong>{String(treatment.action ?? 'event')} · {String(treatment.actor_id ?? 'unknown citizen')}</strong></div></> : <p>Run a durable counterfactual to populate the semantic event comparison.</p>}</div>
+      </div>
+      {impactSummary && <div className="causal-impact-grid"><div><span>Citizens changed</span><strong>{impactSummary.changed_citizen_count}</strong></div><div><span>Claims changed</span><strong>{impactSummary.changed_claim_count}</strong></div><div><span>Communities changed</span><strong>{impactSummary.changed_community_count}</strong></div></div>}
+      <div className="causal-explorer__graph"><div><span className="eyebrow">Recorded dependency graph</span><p>{graph ? `${graph.node_count} nodes · ${graph.edge_count} modeled links` : 'Graph is not available for this run yet.'}</p></div>{graph && edgePreview.length > 0 && <div className="causal-edge-list">{edgePreview.map((edge) => <div key={edge.link_id}><span>T{edge.tick}</span><strong>{edge.relation.replaceAll('_', ' ')}</strong><small>{edge.parent_event_id} → {edge.child_event_id}</small></div>)}</div>}</div>
+      <div className="causal-explorer__note"><Icon name="link" size={14} /><span>{comparison?.evidence.modeled_dependency_label || impactSummary?.evidence.modeled_dependency_label || graph?.evidence.modeled_dependency_label || 'modeled dependency'}: links are declared by simulator rules. {comparison?.evidence.statistical_effect_label || impactSummary?.evidence.statistical_effect_label || graph?.evidence.statistical_effect_label || 'not statistically established effect'}.</span></div>
+    </div>
+  </section>
 }
 
 type HistoryMetric = 'total_contents' | 'engagement_rate' | 'exposure_rate' | 'reshare_rate' | 'correction_reach' | 'polarization'
@@ -374,6 +404,9 @@ export default function App() {
   const [demoRunning, setDemoRunning] = useState(false)
   const [selectedCitizen, setSelectedCitizen] = useState<SelectedCitizen>()
   const [comparison, setComparison] = useState<ExperimentComparison>()
+  const [causalComparison, setCausalComparison] = useState<BranchComparison>()
+  const [impactSummary, setImpactSummary] = useState<ImpactSummary>()
+  const [causalGraph, setCausalGraph] = useState<CausalGraph>()
   const [experimentHistory, setExperimentHistory] = useState<ExperimentHistory>()
   const [experimentRuns, setExperimentRuns] = useState<ExperimentRun[]>([])
   const [experimentBatches, setExperimentBatches] = useState<ExperimentBatch[]>([])
@@ -399,9 +432,37 @@ export default function App() {
     setExperimentRuns([])
     setExperimentBatches([])
     setExperimentHistory(undefined)
+    setComparison(undefined)
+    setCausalComparison(undefined)
+    setImpactSummary(undefined)
+    setCausalGraph(undefined)
     setStateByUniverse({ prime: buildFallbackState('prime'), echo: buildFallbackState('echo') })
     showToast({ tone: 'warning', message })
   }, [showToast])
+
+  const loadCausalArtifacts = useCallback(async (runId: string) => {
+    if (offline) return
+    try {
+      const [branch, impact, graph] = await Promise.all([
+        api.getBranchComparison(runId),
+        api.getImpactSummary(runId),
+        api.getCausalGraph(runId),
+      ])
+      setCausalComparison(branch)
+      setImpactSummary(impact)
+      setCausalGraph(graph)
+    } catch (requestError) {
+      if (isUnavailable(requestError)) enterOfflinePreview()
+      else if (requestError instanceof ApiResponseError && requestError.status === 404) {
+        // Older durable runs remain readable through the legacy result and
+        // history endpoints even when they predate Phase 5 artifacts.
+        setCausalComparison(undefined)
+        setImpactSummary(undefined)
+        setCausalGraph(undefined)
+      }
+      else setError(requestError instanceof Error ? requestError.message : 'Could not load causal artifacts.')
+    }
+  }, [enterOfflinePreview, offline])
 
   const loadExperimentHistory = useCallback(async (universeId: UniverseId) => {
     if (offline) {
@@ -413,11 +474,25 @@ export default function App() {
       const [runs, batches] = await Promise.all([api.getExperimentRuns(universeId), api.getExperimentBatches(universeId)])
       setExperimentRuns(runs)
       setExperimentBatches(batches)
+      const latest = runs.find((run) => run.status === 'completed' && run.result)
+      if (latest?.result) {
+        setComparison({ ...latest.result, run_id: latest.runId, status: latest.status })
+        setCausalComparison(latest.result.branch_comparison)
+        setImpactSummary(latest.result.impact_summary)
+        setExperimentHistory(await api.getExperimentHistory(latest.runId))
+        await loadCausalArtifacts(latest.runId)
+      } else {
+        setComparison(undefined)
+        setCausalComparison(undefined)
+        setImpactSummary(undefined)
+        setCausalGraph(undefined)
+        setExperimentHistory(undefined)
+      }
     } catch (requestError) {
       if (isUnavailable(requestError)) enterOfflinePreview()
       else setError(requestError instanceof Error ? requestError.message : 'Could not load experiment history.')
     }
-  }, [enterOfflinePreview, offline])
+  }, [enterOfflinePreview, loadCausalArtifacts, offline])
 
   const loadUniverse = useCallback(async (universeId: UniverseId, showLoader = false) => {
     if (offline) {
@@ -549,10 +624,13 @@ export default function App() {
         // The actual counterfactual is forked from the synchronized prime
         // snapshot. Control receives only the claim; treatment receives
         // delayed credible counterevidence. The branch result is not UI copy.
-         const branch = await api.runExperiment('prime', 'rumor-counterevidence')
-          setComparison(branch)
-          if (branch.run_id) setExperimentHistory(await api.getExperimentHistory(branch.run_id))
-          setExperimentRuns(await api.getExperimentRuns('prime'))
+           const branch = await api.runExperiment('prime', 'rumor-counterevidence')
+           setComparison(branch)
+           if (branch.run_id) {
+             setExperimentHistory(await api.getExperimentHistory(branch.run_id))
+             await loadCausalArtifacts(branch.run_id)
+           }
+           setExperimentRuns(await api.getExperimentRuns('prime'))
         const [prime, echo] = await Promise.all([api.getState('prime'), api.getState('echo')])
         setUniverseState('prime', prime)
         setUniverseState('echo', echo)
@@ -575,8 +653,13 @@ export default function App() {
         showToast({ tone: 'warning', message: 'Experiment marked complete in preview; no live outcome was recorded.' })
       } else {
         const run = await api.createExperimentRun(activeUniverse, experiment.id)
-        if (run.result) setComparison({ ...run.result, run_id: run.runId, status: run.status })
+        if (run.result) {
+          setComparison({ ...run.result, run_id: run.runId, status: run.status })
+          setCausalComparison(run.result.branch_comparison)
+          setImpactSummary(run.result.impact_summary)
+        }
         setExperimentHistory(await api.getExperimentHistory(run.runId))
+        await loadCausalArtifacts(run.runId)
         setExperimentRuns((current) => [run, ...current.filter((item) => item.runId !== run.runId)])
         setUniverseState(activeUniverse, await api.getState(activeUniverse))
         showToast({ tone: 'success', message: `${experiment.name} completed.` })
@@ -661,7 +744,7 @@ export default function App() {
       case 'social': return <SocialUniverseView state={state} />
       case 'citizens': return <CitizenObservatoryView state={state} selected={selectedCitizen} onSelect={(citizen) => void selectCitizen(citizen)} onNavigate={setActiveView} />
       case 'information': return <InformationEcosystemView state={state} />
-       case 'lab': return <ButterflyLabView state={state} otherState={otherState} comparison={comparison} history={experimentRuns} experimentHistory={experimentHistory} batches={experimentBatches} runningId={busyAction?.startsWith('experiment-') ? busyAction.replace('experiment-', '') : undefined} batchRunningId={busyAction?.startsWith('batch-') ? busyAction.replace('batch-', '') : undefined} onRun={(experiment) => void runExperiment(experiment)} onRunBatch={(experiment) => void runBatch(experiment)} />
+       case 'lab': return <ButterflyLabView state={state} otherState={otherState} comparison={comparison} causalComparison={causalComparison} impactSummary={impactSummary} causalGraph={causalGraph} history={experimentRuns} experimentHistory={experimentHistory} batches={experimentBatches} runningId={busyAction?.startsWith('experiment-') ? busyAction.replace('experiment-', '') : undefined} batchRunningId={busyAction?.startsWith('batch-') ? busyAction.replace('batch-', '') : undefined} onRun={(experiment) => void runExperiment(experiment)} onRunBatch={(experiment) => void runBatch(experiment)} />
       case 'interventions': return <InterventionConsoleView state={state} submitting={busyAction === 'intervention'} onSubmit={(input) => void applyIntervention(input)} />
       case 'mind': return <AgentMindView state={state} />
     }

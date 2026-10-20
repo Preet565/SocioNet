@@ -40,6 +40,9 @@ class InterventionKind(str, Enum):
     SEED_POST = "seed_post"
     TRUST_SHIFT = "trust_shift"
     FACT_CHECK = "fact_check"
+    SUPPRESS_CITIZEN = "suppress_citizen"
+    SUPPRESS_POST = "suppress_post"
+    SUPPRESS_RELATIONSHIP = "suppress_relationship"
 
 
 class ClaimStatus(str, Enum):
@@ -127,6 +130,10 @@ class Content(BaseModel):
     is_reshare: bool = False
     provenance: str = "organic"
     intervention_id: str | None = None
+    parent_event_ids: list[str] = Field(default_factory=list)
+    provenance_event_ids: list[str] = Field(default_factory=list)
+    semantic_key: str | None = None
+    suppressed: bool = False
 
 
 class ClaimProvenanceRecord(BaseModel):
@@ -137,6 +144,7 @@ class ClaimProvenanceRecord(BaseModel):
     parent_content_id: str | None = None
     source: str = "organic"
     intervention_id: str | None = None
+    parent_event_ids: list[str] = Field(default_factory=list)
 
 
 class ClaimLifecycleEvent(BaseModel):
@@ -164,6 +172,62 @@ class Claim(BaseModel):
     lifecycle: list[ClaimLifecycleEvent] = Field(default_factory=list)
 
 
+class CausalLink(BaseModel):
+    """A deterministic, recorded dependency between typed simulation events."""
+
+    link_id: str
+    parent_event_id: str
+    child_event_id: str
+    relation: str
+    tick: int = Field(ge=0)
+    label: Literal["modeled_dependency", "statistically_established_effect"] = "modeled_dependency"
+    provenance: str = "simulator_rule"
+    details: str = ""
+
+
+class ContentExposureEvent(BaseModel):
+    """A citizen observing one content item before making a decision."""
+
+    event_id: str
+    semantic_key: str
+    tick: int = Field(ge=0)
+    actor_id: str
+    content_id: str
+    claim_id: str | None = None
+    topic: str | None = None
+    parent_event_ids: list[str] = Field(default_factory=list)
+    provenance_event_ids: list[str] = Field(default_factory=list)
+
+
+class BeliefUpdateEvent(BaseModel):
+    """The observable before/after evidence update, without hidden reasoning."""
+
+    update_id: str
+    semantic_key: str
+    tick: int = Field(ge=0)
+    agent_id: str
+    topic: str
+    content_id: str | None = None
+    claim_id: str | None = None
+    prior_stance: float | None = None
+    prior_confidence: float | None = None
+    stance: float
+    confidence: float
+    evidence_for: int = Field(default=0, ge=0)
+    evidence_against: int = Field(default=0, ge=0)
+    parent_event_ids: list[str] = Field(default_factory=list)
+    provenance_event_ids: list[str] = Field(default_factory=list)
+
+
+class SuppressedRelationship(BaseModel):
+    """A directional relationship removed from observation and future formation."""
+
+    source_agent_id: str
+    target_agent_id: str
+    intervention_id: str
+    created_tick: int = Field(ge=0)
+
+
 class ActionEvent(BaseModel):
     event_id: str
     tick: int = Field(ge=0)
@@ -175,6 +239,9 @@ class ActionEvent(BaseModel):
     claim_id: str | None = None
     topic: str | None = None
     details: str = ""
+    semantic_key: str | None = None
+    parent_event_ids: list[str] = Field(default_factory=list)
+    provenance_event_ids: list[str] = Field(default_factory=list)
 
 
 class CommunityEventKind(str, Enum):
@@ -329,6 +396,9 @@ class DecisionTrace(BaseModel):
     action: ActionKind | None = None
     content_id: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+    semantic_key: str | None = None
+    parent_event_ids: list[str] = Field(default_factory=list)
+    provenance_event_ids: list[str] = Field(default_factory=list)
 
 
 class SimulationConfig(BaseModel):
@@ -381,6 +451,12 @@ class InterventionRecord(BaseModel):
     applied_tick: int | None = Field(default=None, ge=0)
     status: str = "scheduled"
     source: str = "operator"
+    agent_id: str | None = None
+    target_agent_id: str | None = None
+    content_id: str | None = None
+    semantic_key: str | None = None
+    parent_event_ids: list[str] = Field(default_factory=list)
+    provenance_event_ids: list[str] = Field(default_factory=list)
 
 
 class Intervention(BaseModel):
@@ -397,6 +473,7 @@ class Intervention(BaseModel):
     delta: float = Field(default=0, ge=-1, le=1)
     truth_label: bool | None = None
     text: str | None = None
+    content_id: str | None = None
 
     @field_validator("topic")
     @classmethod
@@ -424,6 +501,37 @@ class Intervention(BaseModel):
             raise ValueError("seed_post intervention requires text")
         if self.kind is InterventionKind.TRUST_SHIFT and self.delta == 0:
             raise ValueError("trust_shift intervention requires a non-zero delta")
+        if self.kind is InterventionKind.SUPPRESS_CITIZEN and not self.agent_id:
+            raise ValueError("suppress_citizen requires agent_id")
+        if self.kind is InterventionKind.SUPPRESS_POST and not self.content_id:
+            raise ValueError("suppress_post requires content_id")
+        if self.kind is InterventionKind.SUPPRESS_RELATIONSHIP and not (self.agent_id and self.target_agent_id):
+            raise ValueError("suppress_relationship requires agent_id and target_agent_id")
+        if self.kind in {
+            InterventionKind.SUPPRESS_CITIZEN,
+            InterventionKind.SUPPRESS_POST,
+            InterventionKind.SUPPRESS_RELATIONSHIP,
+        }:
+            if (
+                self.topic is not None
+                or self.text is not None
+                or self.truth_label is not None
+                or self.delta != 0
+                or self.strength != 0.7
+            ):
+                raise ValueError("suppression interventions accept only their target reference")
+            if self.kind is InterventionKind.SUPPRESS_CITIZEN and (
+                self.target_agent_id is not None
+                or self.content_id is not None
+            ):
+                raise ValueError("suppress_citizen accepts only agent_id")
+            if self.kind is InterventionKind.SUPPRESS_POST and (
+                self.agent_id is not None
+                or self.target_agent_id is not None
+            ):
+                raise ValueError("suppress_post accepts only content_id")
+            if self.kind is InterventionKind.SUPPRESS_RELATIONSHIP and self.content_id is not None:
+                raise ValueError("suppress_relationship accepts only agent_id and target_agent_id")
         return self
 
 
@@ -438,12 +546,18 @@ class SimulationState(BaseModel):
     claims: dict[str, Claim] = Field(default_factory=dict)
     traces: list[DecisionTrace] = Field(default_factory=list)
     events: list[ActionEvent] = Field(default_factory=list)
+    content_exposures: list[ContentExposureEvent] = Field(default_factory=list)
+    belief_updates: list[BeliefUpdateEvent] = Field(default_factory=list)
+    causal_links: list[CausalLink] = Field(default_factory=list)
     community_events: list[CommunityEvent] = Field(default_factory=list)
     network_history: list[NetworkHistorySample] = Field(default_factory=list)
     community_history: list[CommunityHistorySample] = Field(default_factory=list)
     scheduled_interventions: list[ScheduledIntervention] = Field(default_factory=list)
     applied_interventions: list[str] = Field(default_factory=list)
     intervention_history: list[InterventionRecord] = Field(default_factory=list)
+    suppressed_citizen_ids: list[str] = Field(default_factory=list)
+    suppressed_post_ids: list[str] = Field(default_factory=list)
+    suppressed_relationships: list[SuppressedRelationship] = Field(default_factory=list)
     metric_history: list["MetricSample"] = Field(default_factory=list)
     config: SimulationConfig = Field(default_factory=SimulationConfig)
 
@@ -456,6 +570,47 @@ class ExperimentRequest(BaseModel):
     ticks: int = Field(default=3, ge=1, le=50)
     control_interventions: list[Intervention] = Field(default_factory=list)
     treatment_interventions: list[Intervention] = Field(default_factory=list)
+
+
+class PerturbationRequest(BaseModel):
+    """A bounded one-variable control/treatment pair."""
+
+    universe_id: Literal["prime", "echo"] = "prime"
+    ticks: int = Field(default=6, ge=1, le=50)
+    perturbation: Intervention
+
+    @model_validator(mode="after")
+    def require_single_variable_suppression(self) -> "PerturbationRequest":
+        suppression_kinds = {
+            InterventionKind.SUPPRESS_CITIZEN,
+            InterventionKind.SUPPRESS_POST,
+            InterventionKind.SUPPRESS_RELATIONSHIP,
+        }
+        if self.perturbation.kind not in suppression_kinds:
+            raise ValueError("single-variable perturbation requires one explicit suppression intervention")
+        if self.perturbation.delay_ticks != 0:
+            raise ValueError("single-variable perturbations must apply at the source tick")
+        if (
+            self.perturbation.topic is not None
+            or self.perturbation.text is not None
+            or self.perturbation.truth_label is not None
+            or self.perturbation.delta != 0
+            or self.perturbation.strength != 0.7
+        ):
+            raise ValueError("suppression perturbations accept only their target reference")
+        if self.perturbation.kind is InterventionKind.SUPPRESS_CITIZEN and (
+            self.perturbation.target_agent_id is not None
+            or self.perturbation.content_id is not None
+        ):
+            raise ValueError("suppress_citizen accepts only agent_id")
+        if self.perturbation.kind is InterventionKind.SUPPRESS_POST and (
+            self.perturbation.agent_id is not None
+            or self.perturbation.target_agent_id is not None
+        ):
+            raise ValueError("suppress_post accepts only content_id")
+        if self.perturbation.kind is InterventionKind.SUPPRESS_RELATIONSHIP and self.perturbation.content_id is not None:
+            raise ValueError("suppress_relationship accepts only agent_id and target_agent_id")
+        return self
 
 
 SUPPORTED_BATCH_METRICS = frozenset(
@@ -658,6 +813,8 @@ class ExperimentResult(BaseModel):
     control_metrics: Metrics
     treatment_metrics: Metrics
     metric_deltas: dict[str, float]
+    branch_comparison: dict[str, Any] | None = None
+    impact_summary: dict[str, Any] | None = None
 
 
 Agent.model_rebuild()

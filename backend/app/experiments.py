@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.analytics import calculate_metrics, metric_deltas
+from app.causality import branch_causal_payload
 from app.interventions import apply_intervention
 from app.models import ExperimentResult, Intervention, SimulationState
 from app.simulation import Simulation
@@ -29,6 +30,7 @@ def run_side_by_side(
     treatment.run(ticks)
     control_metrics = calculate_metrics(control.state)
     treatment_metrics = calculate_metrics(treatment.state)
+    causal = branch_causal_payload(control.state, treatment.state)
     return ExperimentResult(
         seed=snapshot.seed,
         ticks=ticks,
@@ -37,4 +39,6 @@ def run_side_by_side(
         control_metrics=control_metrics,
         treatment_metrics=treatment_metrics,
         metric_deltas=metric_deltas(control_metrics, treatment_metrics),
+        branch_comparison=causal["comparison"],
+        impact_summary=causal["impact_summary"],
     )
