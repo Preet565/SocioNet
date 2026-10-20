@@ -27,6 +27,7 @@ from app.models import (
     BatchProgress,
     Intervention,
     Metrics,
+    SimulationConfig,
     SimulationState,
     TickRequest,
 )
@@ -44,6 +45,7 @@ from app.simulation import Simulation, create_initial_state, ensure_claim_regist
 class ResetRequest(BaseModel):
     seed: int = Field(default=20261016, ge=0)
     universe_id: Literal["prime", "echo"] | None = None
+    config: SimulationConfig | None = None
 
 
 class UniverseRequest(BaseModel):
@@ -73,7 +75,12 @@ class ExperimentRunCreateRequest(UniverseRequest):
 
 
 class SimulationService:
-    def __init__(self, seed: int = 20261016, database_path: str | None = None) -> None:
+    def __init__(
+        self,
+        seed: int = 20261016,
+        database_path: str | None = None,
+        config: SimulationConfig | None = None,
+    ) -> None:
         path = database_path or os.getenv("SOCIONET_DB_PATH", "./data/socionet.sqlite3")
         self.store = StateStore(path)
         try:
@@ -81,8 +88,11 @@ class SimulationService:
         except FileNotFoundError:
             persisted = None
         self.universes: dict[str, Simulation] = {
-            "prime": Simulation(state=persisted) if persisted is not None else Simulation(seed=seed),
-            "echo": Simulation(seed=persisted.seed if persisted is not None else seed),
+            "prime": Simulation(state=persisted) if persisted is not None else Simulation(seed=seed, config=config),
+            "echo": Simulation(
+                seed=persisted.seed if persisted is not None else seed,
+                config=config,
+            ),
         }
         # Keep the original single-world API stable for scripts and tests.
         self.simulation = self.universes["prime"]
@@ -122,17 +132,25 @@ class SimulationService:
                 self._save_canonical(simulation.state, universe_id)
             return simulation.state
 
-    def reset(self, seed: int) -> SimulationState:
+    def reset(self, seed: int, config: SimulationConfig | None = None) -> SimulationState:
         with self.lock:
-            self.simulation = Simulation(seed=seed)
+            self.simulation = Simulation(seed=seed, config=config)
             self.universes["prime"] = self.simulation
             self._save_canonical(self.state, "prime")
             return self.state
 
-    def reset_universe(self, universe_id: str, seed: int | None = None) -> SimulationState:
+    def reset_universe(
+        self,
+        universe_id: str,
+        seed: int | None = None,
+        config: SimulationConfig | None = None,
+    ) -> SimulationState:
         with self.lock:
             current = self.universe(universe_id)
-            next_simulation = Simulation(seed=current.state.seed if seed is None else seed)
+            next_simulation = Simulation(
+                seed=current.state.seed if seed is None else seed,
+                config=config or current.state.config,
+            )
             self.universes[universe_id] = next_simulation
             if universe_id == "prime":
                 self.simulation = next_simulation
@@ -525,8 +543,8 @@ def compatibility_tick(payload: UniverseTickRequest, request: Request) -> dict[s
 def compatibility_reset(payload: ResetRequest, request: Request) -> dict[str, Any] | SimulationState:
     service = get_service(request)
     if payload.universe_id is None:
-        return service.reset(payload.seed)
-    simulation_state = service.reset_universe(payload.universe_id)
+        return service.reset(payload.seed, config=payload.config)
+    simulation_state = service.reset_universe(payload.universe_id, config=payload.config)
     return frontend_state(
         simulation_state,
         payload.universe_id,
@@ -656,6 +674,76 @@ def analytics_history(
     }
 
 
+def _bounded_dynamic_history(
+    rows: list[dict[str, Any]],
+    *,
+    from_tick: int | None,
+    to_tick: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    selected = [
+        row
+        for row in rows
+        if (from_tick is None or int(row.get("tick", 0)) >= from_tick)
+        and (to_tick is None or int(row.get("tick", 0)) <= to_tick)
+    ]
+    selected.sort(key=lambda row: int(row.get("tick", 0)))
+    return selected[:_bounded_limit(limit)]
+
+
+@app.get("/network/history")
+def network_history(
+    request: Request,
+    universe_id: Literal["prime", "echo"] = "prime",
+    from_tick: int | None = Query(default=None, ge=0),
+    to_tick: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+) -> dict[str, Any]:
+    state = get_service(request).universe(universe_id).state
+    samples = _bounded_dynamic_history(
+        [sample.model_dump(mode="json") for sample in state.network_history],
+        from_tick=from_tick,
+        to_tick=to_tick,
+        limit=limit,
+    )
+    return {
+        "universe_id": universe_id,
+        "samples": samples,
+        "sample_count": len(samples),
+        "metric_cost": "Brandes betweenness is recalculated per tick in O(VE) for the unweighted undirected projection.",
+    }
+
+
+@app.get("/communities/history")
+def communities_history(
+    request: Request,
+    universe_id: Literal["prime", "echo"] = "prime",
+    from_tick: int | None = Query(default=None, ge=0),
+    to_tick: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+) -> dict[str, Any]:
+    state = get_service(request).universe(universe_id).state
+    samples = _bounded_dynamic_history(
+        [sample.model_dump(mode="json") for sample in state.community_history],
+        from_tick=from_tick,
+        to_tick=to_tick,
+        limit=limit,
+    )
+    events = _bounded_dynamic_history(
+        [event.model_dump(mode="json") for event in state.community_events],
+        from_tick=from_tick,
+        to_tick=to_tick,
+        limit=limit,
+    )
+    return {
+        "universe_id": universe_id,
+        "samples": samples,
+        "events": events,
+        "sample_count": len(samples),
+        "event_count": len(events),
+    }
+
+
 def _run_branch_state(run: dict[str, Any], branch: str) -> SimulationState | None:
     result = run.get("result")
     if not isinstance(result, dict) or not isinstance(result.get(branch), dict):
@@ -756,6 +844,9 @@ def metric_definitions() -> dict[str, str]:
         "fact_checks": "Claim-bearing content whose kind is fact_check.",
         "corrections": "Fact-check or counterevidence content whose truth label contradicts the origin claim.",
         "history_limit": "At most 200 recent per-tick samples are retained per state or experiment branch.",
+        "degree": "Number of distinct neighbors in the undirected projection of directed relationship records.",
+        "betweenness": "Normalized shortest-path betweenness in the undirected relationship projection; Brandes costs O(VE) per tick.",
+        "network_density": "Observed undirected social edges divided by possible node pairs.",
     }
 
 

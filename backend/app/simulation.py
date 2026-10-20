@@ -5,9 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.agents import TOPICS, create_citizens
-from app.analytics import MAX_CLAIM_PROVENANCE, record_metric_sample
+from app.analytics import MAX_CLAIM_PROVENANCE, graph_metrics_for_state, record_metric_sample
 from app.beliefs import learn_from_content
-from app.communities import create_communities, join_community, leave_community
+from app.communities import (
+    create_communities,
+    evolve_communities,
+    join_community,
+    leave_community,
+    record_community_event,
+)
 from app.memory import remember, retrieve
 from app.models import (
     ActionEvent,
@@ -19,12 +25,23 @@ from app.models import (
     ClaimStatus,
     Content,
     ContentKind,
+    CommunityEventKind,
     DecisionTrace,
     LifecyclePhase,
+    CommunityHistorySample,
+    NetworkHistorySample,
+    NetworkTie,
     SimulationConfig,
     SimulationState,
 )
-from app.relationships import record_interaction, relationship_for, set_following
+from app.relationships import (
+    evolve_relationships,
+    initialize_relationships,
+    interaction_probability,
+    record_interaction,
+    relationship_for,
+    set_following,
+)
 from app.utils import rng_for
 
 
@@ -37,38 +54,70 @@ class ActionResult:
     details: str = ""
 
 
-def create_initial_state(seed: int = 20261016, *, count: int = 100) -> SimulationState:
-    agents = create_citizens(seed, count=count)
-    communities = create_communities(seed, agents)
-    # Give the opening frame a real, sparse topology instead of an empty graph.
-    # These are seeded affinity signals, not interactions: later ticks can still
-    # strengthen, weaken, follow, or abandon them through the normal lifecycle.
-    for agent in agents.values():
-        peers = sorted(
-            (
-                peer
-                for peer in agents.values()
-                if peer.id != agent.id and set(agent.community_ids).intersection(peer.community_ids)
-            ),
-            key=lambda peer: peer.id,
-        )
-        rng = rng_for(seed, "relationship", agent.id)
-        for peer in peers:
-            if len(agent.relationships) >= 10:
-                break
-            if rng.random() < 0.16:
-                relationship = relationship_for(agent, peer.id)
-                relationship.affinity = round((agent.ideology + peer.ideology) / 2 * 0.35, 4)
-                relationship.trust = round((agent.trust_baseline + peer.trust_baseline) / 2, 4)
+def create_initial_state(
+    seed: int = 20261016,
+    *,
+    count: int | None = None,
+    config: SimulationConfig | None = None,
+) -> SimulationState:
+    if config is None:
+        config = SimulationConfig(population=count if count is not None else 100)
+    elif count is not None and config.population != count:
+        config = SimulationConfig.model_validate({**config.model_dump(), "population": count})
+    agents = create_citizens(seed, count=config.population, config=config)
+    communities = create_communities(seed, agents, config=config)
+    initialize_relationships(seed, agents, communities, config)
     state = SimulationState(
         seed=seed,
         agents=agents,
         communities=communities,
-        config=SimulationConfig(),
+        config=config,
     )
     ensure_claim_registry(state)
-    record_metric_sample(state)
+    sample = record_metric_sample(state)
+    record_dynamic_history(
+        state,
+        graph={
+            "degree": sample.metrics.degree,
+            "betweenness": sample.metrics.betweenness,
+        },
+    )
     return state
+
+
+def record_dynamic_history(state: SimulationState, *, graph: dict[str, object] | None = None) -> None:
+    """Record bounded topology and membership snapshots in stable order."""
+
+    graph = graph or graph_metrics_for_state(state)
+    ties = [
+        NetworkTie(
+            source_id=agent.id,
+            target_id=relationship.target_id,
+            affinity=relationship.affinity,
+            trust=relationship.trust,
+            follows=relationship.follows,
+        )
+        for agent in sorted(state.agents.values(), key=lambda item: item.id)
+        for relationship in sorted(agent.relationships.values(), key=lambda item: item.target_id)
+        if relationship.target_id in state.agents
+    ]
+    network_sample = NetworkHistorySample(
+        tick=state.tick,
+        ties=ties,
+        degree=graph["degree"],
+        betweenness=graph["betweenness"],
+    )
+    state.network_history = [sample for sample in state.network_history if sample.tick != state.tick]
+    state.network_history.append(network_sample)
+    state.network_history = sorted(state.network_history, key=lambda sample: sample.tick)[-state.config.history_limit :]
+    memberships = {
+        community.id: sorted(community.member_ids)
+        for community in sorted(state.communities.values(), key=lambda item: item.id)
+    }
+    community_sample = CommunityHistorySample(tick=state.tick, memberships=memberships)
+    state.community_history = [sample for sample in state.community_history if sample.tick != state.tick]
+    state.community_history.append(community_sample)
+    state.community_history = sorted(state.community_history, key=lambda sample: sample.tick)[-state.config.history_limit :]
 
 
 def stable_claim_id(content_id: str) -> str:
@@ -230,18 +279,54 @@ def append_content(
 class Simulation:
     """Mutable façade around a serializable ``SimulationState``."""
 
-    def __init__(self, seed: int = 20261016, state: SimulationState | None = None) -> None:
-        self.state = state or create_initial_state(seed)
+    def __init__(
+        self,
+        seed: int = 20261016,
+        state: SimulationState | None = None,
+        config: SimulationConfig | None = None,
+    ) -> None:
+        self.state = state or create_initial_state(seed, config=config)
         ensure_claim_registry(self.state)
-        if not any(sample.tick == self.state.tick for sample in self.state.metric_history):
-            record_metric_sample(self.state)
+        current_sample = next(
+            (sample for sample in self.state.metric_history if sample.tick == self.state.tick),
+            None,
+        )
+        if current_sample is None or (self.state.agents and not current_sample.metrics.degree):
+            sample = record_metric_sample(self.state)
+        else:
+            sample = current_sample
+        if not any(sample.tick == self.state.tick for sample in self.state.network_history):
+            record_dynamic_history(
+                self.state,
+                graph={
+                    "degree": sample.metrics.degree,
+                    "betweenness": sample.metrics.betweenness,
+                },
+            )
+        if not any(sample.tick == self.state.tick for sample in self.state.community_history):
+            record_dynamic_history(self.state)
 
     def step(self) -> SimulationState:
         self.state.tick += 1
         self._apply_due_interventions()
         for agent_id in sorted(self.state.agents):
             self._run_agent_lifecycle(self.state.agents[agent_id])
-        record_metric_sample(self.state)
+        evolve_relationships(
+            self.state.seed,
+            self.state.tick,
+            self.state.agents,
+            self.state.communities,
+            self.state.config,
+        )
+        evolve_communities(self.state)
+        sample = record_metric_sample(self.state)
+        record_dynamic_history(
+            self.state,
+            graph={
+                "degree": sample.metrics.degree,
+                "betweenness": sample.metrics.betweenness,
+            },
+        )
         return self.state
 
     def run(self, ticks: int) -> SimulationState:
@@ -331,28 +416,53 @@ class Simulation:
         if not visible:
             return None
         related = [content for content in visible if content.topic in agent.interests]
-        pool = related or visible
+        accessible: list[Content] = []
+        for candidate in visible:
+            author = self.state.agents.get(candidate.author_id)
+            if author is None:
+                continue
+            relationship = agent.relationships.get(author.id)
+            if relationship and relationship.follows:
+                accessible.append(candidate)
+                continue
+            probability = interaction_probability(agent, author, config=self.state.config)
+            cross_rng = rng_for(self.state.seed, "cross-community", self.state.tick, agent.id, candidate.id)
+            if cross_rng.random() < probability:
+                accessible.append(candidate)
+        pool = [candidate for candidate in related if candidate in accessible] or accessible or related or visible
         return pool[rng.randrange(len(pool))]
 
     def _form_intent(self, agent: Agent, content: Content | None, rng) -> ActionKind:
+        behavior = self.state.config.archetypes.get(
+            agent.archetype,
+            self.state.config.archetypes["civic_participant"],
+        )
         if content is None:
-            return ActionKind.POST
-        if rng.random() < self.state.config.post_probability * (0.45 + agent.curiosity * 0.55):
+            post_probability = self.state.config.post_probability * (0.45 + agent.curiosity * 0.55) * behavior.post_bias
+            return ActionKind.POST if rng.random() < min(1.0, post_probability) else ActionKind.IGNORE
+        if rng.random() < min(
+            1.0,
+            self.state.config.post_probability * (0.45 + agent.curiosity * 0.55) * behavior.post_bias,
+        ):
             return ActionKind.POST
         if content.claim_truth is not None and rng.random() < min(
-            1.0, self.state.config.fact_check_probability + agent.skepticism * 0.18
+            1.0,
+            (self.state.config.fact_check_probability + agent.skepticism * 0.18) * behavior.fact_check_bias,
         ):
             return ActionKind.FACT_CHECK
-        if rng.random() < self.state.config.reply_probability:
+        if rng.random() < min(1.0, self.state.config.reply_probability * behavior.reply_bias):
             return ActionKind.REPLY
         target_id = content.author_id
         relationship = agent.relationships.get(target_id)
-        if relationship and relationship.follows and rng.random() < 0.16:
+        if relationship and relationship.follows and rng.random() < min(1.0, 0.16 * behavior.unfollow_bias):
             return ActionKind.UNFOLLOW
-        if (not relationship or not relationship.follows) and rng.random() < 0.2:
+        if (not relationship or not relationship.follows) and rng.random() < min(1.0, 0.2 * behavior.follow_bias):
             return ActionKind.FOLLOW
-        if rng.random() < 0.18:
-            return ActionKind.LEAVE_COMMUNITY if len(agent.community_ids) > 1 else ActionKind.JOIN_COMMUNITY
+        if rng.random() < min(1.0, 0.18 * behavior.join_bias):
+            if len(agent.community_ids) > 1 and rng.random() < min(1.0, behavior.leave_bias):
+                return ActionKind.LEAVE_COMMUNITY
+            if len(agent.community_ids) < self.state.config.community_evolution.max_communities_per_agent:
+                return ActionKind.JOIN_COMMUNITY
         return ActionKind.IGNORE
 
     def _evaluate(self, agent: Agent, content: Content | None, action: ActionKind) -> dict[str, object]:
@@ -413,15 +523,41 @@ class Simulation:
             )
             return ActionResult(ActionKind.FACT_CHECK, target_id=target_id, content_id=created.id, topic=content.topic, details="recorded a fact-check")
         if action is ActionKind.FOLLOW:
-            set_following(agent, target_id, True)
-            return ActionResult(ActionKind.FOLLOW, target_id=target_id, content_id=content.id, topic=content.topic, details="followed the author")
+            relationship = set_following(
+                agent,
+                target_id,
+                True,
+                max_following=self.state.config.max_following,
+            )
+            details = "followed the author" if relationship.follows else "following limit reached"
+            return ActionResult(ActionKind.FOLLOW, target_id=target_id, content_id=content.id, topic=content.topic, details=details)
         if action is ActionKind.UNFOLLOW:
             set_following(agent, target_id, False)
             return ActionResult(ActionKind.UNFOLLOW, target_id=target_id, content_id=content.id, topic=content.topic, details="unfollowed the author")
         if action in {ActionKind.JOIN_COMMUNITY, ActionKind.LEAVE_COMMUNITY}:
             community = self._community_for(agent, content.topic, action)
             if community:
-                changed = join_community(agent, community) if action is ActionKind.JOIN_COMMUNITY else leave_community(agent, community)
+                changed = (
+                    join_community(
+                        agent,
+                        community,
+                        max_communities=self.state.config.community_evolution.max_communities_per_agent,
+                    )
+                    if action is ActionKind.JOIN_COMMUNITY
+                    else leave_community(agent, community)
+                )
+                if changed:
+                    record_community_event(
+                        self.state,
+                        kind=(
+                            CommunityEventKind.JOIN
+                            if action is ActionKind.JOIN_COMMUNITY
+                            else CommunityEventKind.LEAVE
+                        ),
+                        community_id=community.id,
+                        agent_id=agent.id,
+                        details=f"{action.value} decision applied",
+                    )
                 return ActionResult(action, target_id=community.id, content_id=content.id, topic=community.topic, details=f"community membership changed={changed}")
         return ActionResult(ActionKind.IGNORE, target_id=target_id, content_id=content.id, topic=content.topic, details="ignored the content")
 
@@ -441,7 +577,7 @@ class Simulation:
             learn_from_content(agent, content, trust=trust, skepticism=agent.skepticism)
             positive = result.action in {ActionKind.REPLY, ActionKind.FOLLOW, ActionKind.FACT_CHECK}
             if result.action is not ActionKind.POST and content.author_id != agent.id:
-                record_interaction(agent, content.author_id, positive=positive)
+                record_interaction(agent, content.author_id, positive=positive, tick=self.state.tick)
             remember(
                 agent,
                 content=content,

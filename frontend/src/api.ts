@@ -111,6 +111,8 @@ const normalizeNode = (value: unknown, index: number): NetworkNode => {
     x: numberOr(pick(record, ['x', 'position_x']), Number.NaN),
     y: numberOr(pick(record, ['y', 'position_y']), Number.NaN),
     group: stringOr(pick(record, ['group', 'cluster']), undefined as unknown as string),
+    degree: numberOr(pick(record, ['degree']), 0),
+    betweenness: numberOr(pick(record, ['betweenness']), 0),
   }
 }
 
@@ -133,6 +135,8 @@ const normalizeCitizen = (value: unknown, index: number): Citizen => {
     name: stringOr(pick(record, ['name', 'display_name']), `Citizen ${index + 1}`),
     handle: stringOr(pick(record, ['handle', 'username']), '@unassigned'),
     archetype: stringOr(pick(record, ['archetype', 'role', 'persona']), 'Participant'),
+    archetypeKey: typeof pick(record, ['archetypeKey', 'archetype_key']) === 'string' ? pick(record, ['archetypeKey', 'archetype_key']) as string : undefined,
+    behaviorParameters: (asRecord(pick(record, ['behaviorParameters', 'behavior_parameters'])) ?? {}) as Record<string, number>,
     location: stringOr(pick(record, ['location', 'timezone']), 'Unknown location'),
     status: allowedStatuses.includes(status as Citizen['status']) ? status as Citizen['status'] : 'active',
     sentiment: numberOr(pick(record, ['sentiment', 'valence']), 0.5),
@@ -508,6 +512,10 @@ export const normalizeState = (payload: unknown, universeId: UniverseId): Univer
     events: arrayOr(pick(root, ['events', 'event_stream'])).map(normalizeEvent),
     communities: arrayOr(pick(root, ['communities'])).map((value) => value as NonNullable<UniverseState['communities']>[number]),
     metricsDetail: asRecord(pick(root, ['metricsDetail', 'metrics_detail'])) as UniverseState['metricsDetail'],
+    graphMetrics: asRecord(pick(root, ['graphMetrics', 'graph_metrics'])) as UniverseState['graphMetrics'],
+    communityEvents: arrayOr(pick(root, ['communityEvents', 'community_events'])) as NonNullable<UniverseState['communityEvents']>,
+    networkHistory: arrayOr(pick(root, ['networkHistory', 'network_history'])) as NonNullable<UniverseState['networkHistory']>,
+    communityHistory: arrayOr(pick(root, ['communityHistory', 'community_history'])) as NonNullable<UniverseState['communityHistory']>,
   }
 }
 
@@ -589,6 +597,20 @@ export const api = {
     if (options.toTick !== undefined) params.set('to_tick', String(options.toTick))
     if (options.limit !== undefined) params.set('limit', String(options.limit))
     return request<{ samples: MetricHistorySample[]; metric_definitions: Record<string, string> }>(`/analytics/history?${params.toString()}`)
+  },
+  getNetworkHistory: (universeId: UniverseId, options: { fromTick?: number; toTick?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams({ universe_id: universeId })
+    if (options.fromTick !== undefined) params.set('from_tick', String(options.fromTick))
+    if (options.toTick !== undefined) params.set('to_tick', String(options.toTick))
+    if (options.limit !== undefined) params.set('limit', String(options.limit))
+    return request<{ samples: NonNullable<UniverseState['networkHistory']>; metric_cost: string }>(`/network/history?${params.toString()}`)
+  },
+  getCommunityHistory: (universeId: UniverseId, options: { fromTick?: number; toTick?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams({ universe_id: universeId })
+    if (options.fromTick !== undefined) params.set('from_tick', String(options.fromTick))
+    if (options.toTick !== undefined) params.set('to_tick', String(options.toTick))
+    if (options.limit !== undefined) params.set('limit', String(options.limit))
+    return request<{ samples: NonNullable<UniverseState['communityHistory']>; events: NonNullable<UniverseState['communityEvents']> }>(`/communities/history?${params.toString()}`)
   },
   getClaims: async (universeId: UniverseId, options: { runId?: string; branch?: 'control' | 'treatment'; claimId?: string; status?: string; topic?: string; limit?: number } = {}) => {
     const params = new URLSearchParams({ universe_id: universeId })

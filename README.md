@@ -9,6 +9,8 @@ NPC Internet is a local, deterministic civilization simulator. One hundred ficti
 - Rule-based post, reply, fact-check, ignore, follow/unfollow, and community membership actions.
 - Belief updates that use evidence truth labels, credibility, skepticism, and source trust; popularity is not treated as proof.
 - Sparse seeded social graph that changes through interactions and relationship updates.
+- Configurable population and initial `community`, `ring`, `random`, or `empty` network structure; archetype behavior parameters change decisions rather than only display labels.
+- Deterministic homophily/cross-community interaction, relationship formation and decay, following evolution, bounded graph density, community join/leave/split/merge events, degree and betweenness metrics, and dynamic topology/community histories.
 - Bounded discrete ticks, delayed interventions, reproducible branch execution, and SQLite snapshot persistence.
 - Durable experiment runs with explicit source/control/treatment snapshot provenance, additive SQLite schema migration, and canonical Prime filtering.
 - Per-tick metric history with bounded durable branch samples and deterministic tick ordering.
@@ -135,6 +137,14 @@ curl -X POST http://127.0.0.1:8000/reset \
   -d '{"universe_id":"prime"}'
 ```
 
+The compatibility reset accepts an additive `config` object for Phase 4 population and topology control. Existing seed-only reset requests retain the 100-citizen defaults:
+
+```sh
+curl -X POST http://127.0.0.1:8000/reset \
+  -H 'content-type: application/json' \
+  -d '{"seed":901,"config":{"population":24,"max_relationships":6,"max_following":3,"initial_network":{"structure":"ring","max_edges_per_agent":6,"ring_degree":2}}}'
+```
+
 ## API surface
 
 - `GET /health`
@@ -143,6 +153,8 @@ curl -X POST http://127.0.0.1:8000/reset \
 - `POST /reset`
 - `GET /analytics`
 - `GET /analytics/history` with universe, run/branch, tick-range, and bounded-limit filters
+- `GET /network/history` for bounded per-tick ties, degree, betweenness, and the documented graph-metric cost
+- `GET /communities/history` for bounded membership snapshots and join/leave/split/merge event records
 - `GET /analytics/claims` and `GET /analytics/claims/{claim_id}` for lifecycle, provenance, and claim-specific metric filters
 - `GET /citizens`, `GET /citizens/{citizen_id}`
 - `GET /experiments`, `POST /experiments/run`, `POST /experiments/side-by-side`
@@ -189,3 +201,5 @@ Open <http://127.0.0.1:8080>. If Docker Desktop is not running, use the local co
 - Phase 3 batches are bounded, serial, synchronous, and in-process. Progress is durably updated after each completed pair; background queues, cancellation, and distributed execution are later concerns.
 - Batch confidence intervals are exact distribution-free intervals for the paired median, and effect sizes are computed from successful paired differences. They are robustness summaries for this fictional simulator, not inferential claims about real populations.
 - Metrics are synthetic measurements of a fictional population and must not be interpreted as evidence about real people or communities.
+- Phase 4 betweenness is recalculated synchronously with the Brandes O(VE) algorithm over an unweighted undirected projection of directed ties; it is bounded by configured population and relationship caps but is not incremental or cached.
+- Phase 4 community split/merge behavior is a deterministic threshold rule over ideology means and shared topics, with at most one split and one merge per tick. Dynamic topology/community histories are retained in state snapshots and bounded to 5–200 samples by configuration rather than normalized into separate persistence tables.

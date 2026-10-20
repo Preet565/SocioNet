@@ -99,3 +99,38 @@ The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it
 - Batch execution is synchronous, serial, and in-process. There is no background queue, cancellation, live polling during the request, or distributed worker support.
 - Batch confidence intervals describe the paired median with a conservative exact order-statistic method; they are not claims about real-world populations.
 - Failed children are retained as durable `failed` runs and excluded from paired aggregate statistics; a batch can finish as `completed_with_failures`.
+
+## Phase 4 — dynamic agents, relationships, and communities
+
+### Implemented
+
+- Added additive `SimulationConfig` validation for population, memory/history limits, relationship/following caps, formation/decay rates, homophily, cross-community interaction, archetype behavior, initial network structure, and community evolution bounds.
+- Added explicit behavioral archetype parameters for posting, replying, fact-checking, following, leaving/joining, relationship formation/decay, homophily, and cross-community interaction. Presentation labels remain projections; the configured parameters are decision inputs.
+- Added deterministic seeded initial `community`, `ring`, `random`, and `empty` network structures with stable ID ordering and bounded per-agent relationship/following density.
+- Added homophily-aware observation and relationship formation, deterministic affinity/trust decay, and following adoption/unfollowing evolution.
+- Added bounded memory and topology limits to relationship pruning, following lists, community memberships, and dynamic history samples.
+- Added recorded community `join`, `leave`, `split`, and `merge` events plus per-tick network and membership history in serializable state snapshots.
+- Added undirected-projection degree, average degree, density, and normalized Brandes betweenness metrics to analytics and frontend graph projections. The metric cost is documented as O(VE) per tick for the unweighted graph.
+- Added `/network/history` and `/communities/history` APIs, reset-time `SimulationConfig` support, graph metric definitions, and minimal frontend display of degree, betweenness, and density.
+- Preserved old snapshots and API responses with additive defaults. New histories and metrics are deterministically ordered by tick and stable IDs.
+
+### Verification
+
+Commands run:
+
+```text
+python3 -m pytest tests/test_phase4.py       # 7 passed
+python3 -m pytest                            # 41 passed
+cd frontend && npm run typecheck             # passed
+cd frontend && npm run build                 # passed
+git diff --check                             # passed
+```
+
+The backend emits the existing FastAPI/Starlette `httpx` deprecation warning; it does not fail the suite.
+
+### Known limitations
+
+- Betweenness is recalculated synchronously per tick with Brandes over an unweighted undirected projection, costing O(VE); this is bounded by the population and relationship caps but is not a cached or incremental graph algorithm.
+- Community split/merge rules are deterministic threshold rules over ideology means and shared topics, not a general community-detection algorithm. At most one split and one merge are applied per tick.
+- Dynamic histories are bounded by `SimulationConfig.history_limit` (5–200) and are stored in snapshots/API projections; they are not normalized into separate persistence tables.
+- The initial graph is directed in agent state and browser edges, while degree/betweenness intentionally use its undirected social-topology projection. These are synthetic measures for the fictional simulator.

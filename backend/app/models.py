@@ -62,6 +62,7 @@ class Agent(BaseModel):
     skepticism: float = Field(ge=0, le=1)
     curiosity: float = Field(ge=0, le=1)
     trust_baseline: float = Field(ge=0, le=1)
+    archetype: str = "civic_participant"
     beliefs: dict[str, "Belief"] = Field(default_factory=dict)
     memories: list["MemoryRecord"] = Field(default_factory=list)
     relationships: dict[str, "Relationship"] = Field(default_factory=dict)
@@ -98,6 +99,7 @@ class Relationship(BaseModel):
     trust: float = Field(default=0.5, ge=0, le=1)
     interactions: int = Field(default=0, ge=0)
     follows: bool = False
+    last_interaction_tick: int | None = Field(default=None, ge=0)
 
 
 class Community(BaseModel):
@@ -175,6 +177,150 @@ class ActionEvent(BaseModel):
     details: str = ""
 
 
+class CommunityEventKind(str, Enum):
+    JOIN = "join"
+    LEAVE = "leave"
+    SPLIT = "split"
+    MERGE = "merge"
+
+
+class ArchetypeBehavior(BaseModel):
+    """Decision multipliers for a behavioral archetype.
+
+    These values are simulation inputs.  The presentation layer may turn an
+    archetype into a friendly label, but the multipliers below are what change
+    agent decisions and network evolution.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    post_bias: float = Field(default=1.0, ge=0, le=2)
+    reply_bias: float = Field(default=1.0, ge=0, le=2)
+    fact_check_bias: float = Field(default=1.0, ge=0, le=2)
+    follow_bias: float = Field(default=1.0, ge=0, le=2)
+    unfollow_bias: float = Field(default=1.0, ge=0, le=2)
+    join_bias: float = Field(default=1.0, ge=0, le=2)
+    leave_bias: float = Field(default=1.0, ge=0, le=2)
+    relationship_formation_bias: float = Field(default=1.0, ge=0, le=2)
+    relationship_decay_bias: float = Field(default=1.0, ge=0, le=2)
+    homophily_bias: float = Field(default=1.0, ge=0, le=2)
+    cross_community_bias: float = Field(default=1.0, ge=0, le=2)
+
+
+def _default_archetypes() -> dict[str, ArchetypeBehavior]:
+    return {
+        "civic_participant": ArchetypeBehavior(),
+        "evidence_keeper": ArchetypeBehavior(
+            post_bias=0.8,
+            reply_bias=0.85,
+            fact_check_bias=1.8,
+            follow_bias=0.75,
+            unfollow_bias=1.15,
+            homophily_bias=1.1,
+        ),
+        "signal_seeker": ArchetypeBehavior(
+            post_bias=1.15,
+            reply_bias=1.1,
+            fact_check_bias=0.8,
+            follow_bias=1.25,
+            relationship_formation_bias=1.2,
+            cross_community_bias=1.25,
+            homophily_bias=0.8,
+        ),
+        "community_steward": ArchetypeBehavior(
+            post_bias=0.95,
+            reply_bias=1.2,
+            follow_bias=1.05,
+            join_bias=1.3,
+            leave_bias=0.65,
+            relationship_formation_bias=1.15,
+            cross_community_bias=0.9,
+        ),
+        "bridge_builder": ArchetypeBehavior(
+            post_bias=1.0,
+            reply_bias=1.15,
+            follow_bias=1.1,
+            relationship_formation_bias=1.25,
+            homophily_bias=0.7,
+            cross_community_bias=1.8,
+        ),
+        "contrarian": ArchetypeBehavior(
+            post_bias=1.1,
+            reply_bias=1.05,
+            fact_check_bias=1.15,
+            follow_bias=0.7,
+            unfollow_bias=1.3,
+            relationship_formation_bias=0.85,
+            homophily_bias=0.9,
+        ),
+    }
+
+
+class InitialNetworkConfig(BaseModel):
+    """Bounded deterministic topology used for the opening snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    structure: Literal["community", "ring", "random", "empty"] = "community"
+    max_edges_per_agent: int = Field(default=10, ge=0, le=50)
+    edge_probability: float = Field(default=0.16, ge=0, le=1)
+    ring_degree: int = Field(default=2, ge=1, le=10)
+    homophily_weight: float = Field(default=0.65, ge=0, le=1)
+    cross_community_probability: float = Field(default=0.08, ge=0, le=1)
+
+
+class CommunityEvolutionConfig(BaseModel):
+    """Rules and bounds for deterministic community transitions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    split_enabled: bool = True
+    merge_enabled: bool = True
+    max_communities_per_agent: int = Field(default=3, ge=1, le=10)
+    split_size: int = Field(default=80, ge=2, le=500)
+    split_min_size: int = Field(default=3, ge=1, le=250)
+    split_ideology_gap: float = Field(default=0.8, ge=0, le=2)
+    merge_similarity: float = Field(default=0.9, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def split_can_produce_two_communities(self) -> "CommunityEvolutionConfig":
+        if self.split_min_size * 2 > self.split_size:
+            raise ValueError("split_min_size * 2 must not exceed split_size")
+        return self
+
+
+class NetworkTie(BaseModel):
+    source_id: str
+    target_id: str
+    affinity: float = Field(ge=-1, le=1)
+    trust: float = Field(ge=0, le=1)
+    follows: bool = False
+
+
+class NetworkHistorySample(BaseModel):
+    tick: int = Field(ge=0)
+    ties: list[NetworkTie] = Field(default_factory=list)
+    degree: dict[str, int] = Field(default_factory=dict)
+    betweenness: dict[str, float] = Field(default_factory=dict)
+
+
+class CommunityHistorySample(BaseModel):
+    tick: int = Field(ge=0)
+    memberships: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class CommunityEvent(BaseModel):
+    event_id: str
+    tick: int = Field(ge=0)
+    kind: CommunityEventKind
+    community_id: str
+    agent_id: str | None = None
+    related_community_ids: list[str] = Field(default_factory=list)
+    member_ids: list[str] = Field(default_factory=list)
+    details: str = ""
+
+
 class DecisionTrace(BaseModel):
     trace_id: str
     tick: int = Field(ge=0)
@@ -186,11 +332,37 @@ class DecisionTrace(BaseModel):
 
 
 class SimulationConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    population: int = Field(default=100, ge=1, le=500)
     observation_window: int = Field(default=18, ge=1, le=100)
     memory_limit: int = Field(default=40, ge=5, le=200)
     fact_check_probability: float = Field(default=0.18, ge=0, le=1)
     post_probability: float = Field(default=0.62, ge=0, le=1)
     reply_probability: float = Field(default=0.35, ge=0, le=1)
+    max_relationships: int = Field(default=10, ge=0, le=50)
+    max_following: int = Field(default=10, ge=0, le=50)
+    relationship_formation_probability: float = Field(default=0.08, ge=0, le=1)
+    relationship_decay_rate: float = Field(default=0.02, ge=0, le=1)
+    following_adoption_probability: float = Field(default=0.12, ge=0, le=1)
+    following_decay_probability: float = Field(default=0.06, ge=0, le=1)
+    homophily_weight: float = Field(default=0.65, ge=0, le=1)
+    cross_community_interaction_probability: float = Field(default=0.12, ge=0, le=1)
+    history_limit: int = Field(default=200, ge=5, le=200)
+    archetypes: dict[str, ArchetypeBehavior] = Field(default_factory=_default_archetypes)
+    initial_network: InitialNetworkConfig = Field(default_factory=InitialNetworkConfig)
+    community_evolution: CommunityEvolutionConfig = Field(default_factory=CommunityEvolutionConfig)
+
+    @model_validator(mode="after")
+    def validate_phase4_bounds(self) -> "SimulationConfig":
+        if self.max_following > self.max_relationships:
+            raise ValueError("max_following must not exceed max_relationships")
+        if self.initial_network.max_edges_per_agent > self.max_relationships:
+            raise ValueError("initial_network.max_edges_per_agent must not exceed max_relationships")
+        defaults = _default_archetypes()
+        defaults.update(self.archetypes)
+        self.archetypes = defaults
+        return self
 
 
 class ScheduledIntervention(BaseModel):
@@ -266,6 +438,9 @@ class SimulationState(BaseModel):
     claims: dict[str, Claim] = Field(default_factory=dict)
     traces: list[DecisionTrace] = Field(default_factory=list)
     events: list[ActionEvent] = Field(default_factory=list)
+    community_events: list[CommunityEvent] = Field(default_factory=list)
+    network_history: list[NetworkHistorySample] = Field(default_factory=list)
+    community_history: list[CommunityHistorySample] = Field(default_factory=list)
     scheduled_interventions: list[ScheduledIntervention] = Field(default_factory=list)
     applied_interventions: list[str] = Field(default_factory=list)
     intervention_history: list[InterventionRecord] = Field(default_factory=list)
@@ -305,6 +480,8 @@ SUPPORTED_BATCH_METRICS = frozenset(
         "correction_reach",
         "community_fragmentation",
         "time_until_claim_stops_spreading",
+        "average_degree",
+        "network_density",
     }
 )
 
@@ -446,6 +623,10 @@ class Metrics(BaseModel):
     time_until_claim_stops_spreading: int = 0
     topic_metrics: dict[str, dict[str, float | int]] = Field(default_factory=dict)
     claim_metrics: dict[str, "ClaimMetrics"] = Field(default_factory=dict)
+    degree: dict[str, int] = Field(default_factory=dict)
+    betweenness: dict[str, float] = Field(default_factory=dict)
+    average_degree: float = 0.0
+    network_density: float = 0.0
 
 
 class ClaimMetrics(BaseModel):

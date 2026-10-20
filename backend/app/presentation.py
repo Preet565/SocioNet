@@ -62,15 +62,15 @@ def _sentiment(agent: Agent) -> float:
 
 
 def _archetype(agent: Agent) -> str:
-    if agent.skepticism >= 0.68:
-        return "Evidence Keeper"
-    if agent.curiosity >= 0.78:
-        return "Signal Seeker"
-    if agent.trust_baseline >= 0.72:
-        return "Community Steward"
-    if agent.ideology < -0.3:
-        return "Contrarian"
-    return "Civic Participant"
+    labels = {
+        "evidence_keeper": "Evidence Keeper",
+        "signal_seeker": "Signal Seeker",
+        "community_steward": "Community Steward",
+        "bridge_builder": "Bridge Builder",
+        "contrarian": "Contrarian",
+        "civic_participant": "Civic Participant",
+    }
+    return labels.get(agent.archetype, "Civic Participant")
 
 
 def _status(agent: Agent, influence: float) -> str:
@@ -90,13 +90,19 @@ def _belief_labels(agent: Agent) -> list[str]:
     ]
 
 
-def _agent_view(agent: Agent, influence: float) -> dict[str, Any]:
+def _agent_view(
+    agent: Agent,
+    influence: float,
+    behavior_parameters: dict[str, float] | None = None,
+) -> dict[str, Any]:
     relationships = list(agent.relationships.values())
     return {
         "id": agent.id,
         "name": agent.name,
         "handle": f"@{agent.id.replace('citizen-', 'citizen_')}",
         "archetype": _archetype(agent),
+        "archetypeKey": agent.archetype,
+        "behaviorParameters": behavior_parameters or {},
         "location": f"Fictional district {int(agent.id.split('-')[-1]) % 12 + 1:02d}",
         "status": _status(agent, influence),
         "sentiment": _sentiment(agent),
@@ -219,6 +225,8 @@ def frontend_state(
                 "kind": "citizen",
                 "influence": influences[agent.id],
                 "sentiment": _sentiment(agent),
+                "degree": metrics.degree.get(agent.id, 0),
+                "betweenness": metrics.betweenness.get(agent.id, 0.0),
                 "x": round(8 + rng.random() * 84, 4),
                 "y": round(8 + rng.random() * 84, 4),
                 "group": community_name,
@@ -257,7 +265,16 @@ def frontend_state(
         "communities": [community.model_dump(mode="json") for community in sorted(state.communities.values(), key=lambda item: item.id)],
         "nodes": nodes,
         "edges": edges,
-        "citizens": [_agent_view(agent, influences[agent.id]) for agent in agents],
+        "citizens": [
+            _agent_view(
+                agent,
+                influences[agent.id],
+                state.config.archetypes.get(agent.archetype).model_dump(mode="json")
+                if agent.archetype in state.config.archetypes
+                else None,
+            )
+            for agent in agents
+        ],
         "sources": _sources(state),
         "experiments": [
             {
@@ -279,17 +296,34 @@ def frontend_state(
         "minds": _minds(state),
         "posts": _posts(state),
         "events": [event.model_dump(mode="json") for event in state.events[-120:]],
+        "communityEvents": [event.model_dump(mode="json") for event in state.community_events[-120:]],
+        "networkHistory": [sample.model_dump(mode="json") for sample in state.network_history[-20:]],
+        "communityHistory": [sample.model_dump(mode="json") for sample in state.community_history[-20:]],
+        "graphMetrics": {
+            "degree": metrics.degree,
+            "betweenness": metrics.betweenness,
+            "averageDegree": metrics.average_degree,
+            "networkDensity": metrics.network_density,
+        },
         "metricsDetail": metrics.model_dump(mode="json"),
     }
 
 
 def citizen_view(state: SimulationState, citizen_id: str) -> dict[str, Any]:
     agent = state.agents[citizen_id]
-    view = _agent_view(agent, _influence(agent))
+    behavior = state.config.archetypes.get(agent.archetype)
+    view = _agent_view(
+        agent,
+        _influence(agent),
+        behavior.model_dump(mode="json") if behavior is not None else None,
+    )
     view.update(
         {
             "memories": [memory.model_dump(mode="json") for memory in reversed(agent.memories)],
-            "relationships": [relationship.model_dump(mode="json") for relationship in agent.relationships.values()],
+            "relationships": [
+                relationship.model_dump(mode="json")
+                for relationship in sorted(agent.relationships.values(), key=lambda item: item.target_id)
+            ],
             "decisionTrace": [trace.model_dump(mode="json") for trace in state.traces if trace.agent_id == citizen_id][-70:],
             "recentPosts": [content.model_dump(mode="json") for content in state.contents if content.author_id == citizen_id][-30:],
         }

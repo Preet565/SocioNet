@@ -29,6 +29,8 @@ export interface NetworkNode {
   x?: number
   y?: number
   group?: string
+  degree?: number
+  betweenness?: number
 }
 
 export interface NetworkEdge {
@@ -43,6 +45,8 @@ export interface Citizen {
   name: string
   handle: string
   archetype: string
+  archetypeKey?: string
+  behaviorParameters?: Record<string, number>
   location: string
   status: 'active' | 'observed' | 'quiet' | 'influential'
   sentiment: number
@@ -161,6 +165,15 @@ export interface UniverseState {
   events?: WorldEvent[]
   communities?: Array<{ id: string; name: string; topic: string; description: string; member_ids: string[] }>
   metricsDetail?: MetricsDetail
+  graphMetrics?: {
+    degree: Record<string, number>
+    betweenness: Record<string, number>
+    averageDegree: number
+    networkDensity: number
+  }
+  communityEvents?: Array<{ event_id: string; tick: number; kind: string; community_id: string; agent_id?: string | null; related_community_ids: string[]; member_ids: string[]; details: string }>
+  networkHistory?: Array<{ tick: number; ties: Array<{ source_id: string; target_id: string; affinity: number; trust: number; follows: boolean }>; degree: Record<string, number>; betweenness: Record<string, number> }>
+  communityHistory?: Array<{ tick: number; memberships: Record<string, string[]> }>
 }
 
 export interface HealthResponse {
@@ -266,6 +279,10 @@ export interface MetricsDetail {
   time_until_claim_stops_spreading: number
   topic_metrics: Record<string, Record<string, number>>
   claim_metrics: Record<string, ClaimMetricSnapshot>
+  degree?: Record<string, number>
+  betweenness?: Record<string, number>
+  average_degree?: number
+  network_density?: number
 }
 
 export interface MetricHistorySample {

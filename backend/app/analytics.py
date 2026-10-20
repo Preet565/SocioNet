@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from math import sqrt
+from typing import Iterable
 
 from app.models import (
     ActionKind,
@@ -19,6 +20,85 @@ from app.models import (
 
 MAX_METRIC_HISTORY = 200
 MAX_CLAIM_PROVENANCE = 400
+
+
+def calculate_graph_metrics(
+    nodes: Iterable[str],
+    edges: Iterable[tuple[str, str]],
+) -> dict[str, object]:
+    """Calculate degree and normalized betweenness on an undirected projection.
+
+    Relationship records are directed, but this social-topology projection
+    treats each directed tie as one undirected connection. The Brandes
+    shortest-path algorithm costs O(VE) per calculation for an unweighted
+    graph, so this function is intentionally called once per recorded tick.
+    Self-loops and unknown endpoints are ignored; output keys are stable.
+    """
+
+    node_ids = sorted(set(nodes))
+    adjacency = {node_id: set() for node_id in node_ids}
+    for source, target in edges:
+        if source == target or source not in adjacency or target not in adjacency:
+            continue
+        adjacency[source].add(target)
+        adjacency[target].add(source)
+
+    degree = {node_id: len(adjacency[node_id]) for node_id in node_ids}
+    betweenness = {node_id: 0.0 for node_id in node_ids}
+    for source in node_ids:
+        stack: list[str] = []
+        predecessors = {node_id: [] for node_id in node_ids}
+        paths = {node_id: 0.0 for node_id in node_ids}
+        paths[source] = 1.0
+        distance = {node_id: -1 for node_id in node_ids}
+        distance[source] = 0
+        queue: deque[str] = deque([source])
+        while queue:
+            current = queue.popleft()
+            stack.append(current)
+            for neighbor in sorted(adjacency[current]):
+                if distance[neighbor] < 0:
+                    queue.append(neighbor)
+                    distance[neighbor] = distance[current] + 1
+                if distance[neighbor] == distance[current] + 1:
+                    paths[neighbor] += paths[current]
+                    predecessors[neighbor].append(current)
+        dependency = {node_id: 0.0 for node_id in node_ids}
+        for current in reversed(stack):
+            for predecessor in predecessors[current]:
+                if paths[current]:
+                    dependency[predecessor] += (
+                        paths[predecessor] / paths[current]
+                    ) * (1.0 + dependency[current])
+            if current != source:
+                betweenness[current] += dependency[current]
+
+    if len(node_ids) > 2:
+        denominator = (len(node_ids) - 1) * (len(node_ids) - 2) / 2
+        betweenness = {
+            node_id: round(value / 2 / denominator, 6)
+            for node_id, value in betweenness.items()
+        }
+    else:
+        betweenness = {node_id: 0.0 for node_id in node_ids}
+    edge_count = sum(degree.values()) // 2
+    possible_edges = len(node_ids) * (len(node_ids) - 1) // 2
+    return {
+        "degree": degree,
+        "betweenness": betweenness,
+        "average_degree": round(sum(degree.values()) / max(1, len(node_ids)), 6),
+        "network_density": round(edge_count / max(1, possible_edges), 6),
+    }
+
+
+def graph_metrics_for_state(state: SimulationState) -> dict[str, object]:
+    edges = [
+        (agent.id, relationship.target_id)
+        for agent in sorted(state.agents.values(), key=lambda item: item.id)
+        for relationship in sorted(agent.relationships.values(), key=lambda item: item.target_id)
+        if relationship.target_id in state.agents
+    ]
+    return calculate_graph_metrics(sorted(state.agents), edges)
 
 
 def _claim_id_for_content(content: Content, content_by_id: dict[str, Content]) -> str | None:
@@ -161,6 +241,7 @@ def calculate_metrics(state: SimulationState) -> Metrics:
             6,
         )
 
+    graph = graph_metrics_for_state(state)
     return Metrics(
         tick=state.tick,
         population=len(agents),
@@ -187,6 +268,10 @@ def calculate_metrics(state: SimulationState) -> Metrics:
         time_until_claim_stops_spreading=time_until_claim_stops_spreading,
         topic_metrics=dict(sorted(topics.items())),
         claim_metrics=claim_metrics(state),
+        degree=graph["degree"],
+        betweenness=graph["betweenness"],
+        average_degree=float(graph["average_degree"]),
+        network_density=float(graph["network_density"]),
     )
 
 
@@ -212,6 +297,8 @@ def metric_deltas(control: Metrics, treatment: Metrics) -> dict[str, float]:
         "correction_reach",
         "community_fragmentation",
         "time_until_claim_stops_spreading",
+        "average_degree",
+        "network_density",
     )
     return {name: round(float(getattr(treatment, name)) - float(getattr(control, name)), 6) for name in names}
 

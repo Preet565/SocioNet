@@ -28,7 +28,7 @@ The trace contains execution facts and rule inputs. It does not claim to expose 
 - `memory.py`: bounded episodic memory, retrieval, decay, and durable limits.
 - `beliefs.py`: evidence-aware belief updates.
 - `relationships.py`: affinity/trust/following transitions.
-- `communities.py`: seeded membership and join/leave operations.
+- `communities.py`: seeded membership, join/leave operations, deterministic split/merge transitions, and community event records.
 - `simulation.py`: tick orchestration and lifecycle.
 - `interventions.py`: typed validation, immediate/delayed application, intervention history.
 - `experiments.py`: deep-copy fork from one snapshot and metric comparison.
@@ -66,6 +66,10 @@ SQLite stores batch metadata and serialized aggregate output in `experiment_batc
 - **Influence**: documented UI score from non-ignore actions, following count, and weighted trust ties, clamped to [0, 1].
 - **Information entropy proxy**: `1 - belief_accuracy`, where belief accuracy is evidence-for / all evidence counts. This is a synthetic proxy, not Shannon entropy.
 - **Time until claim stops spreading**: current tick minus the latest claim-bearing content tick (zero when no claim has been observed yet).
+- **Degree**: number of distinct neighbors in the undirected projection of directed relationship records.
+- **Betweenness**: normalized unweighted shortest-path betweenness in that same undirected projection. The Brandes calculation costs O(VE) per tick and is bounded by the configured population and relationship caps.
+- **Average degree**: mean degree across all configured agents, including isolated nodes.
+- **Network density**: observed undirected edge count divided by possible node pairs.
 
 Claim-specific history uses these definitions:
 
@@ -76,3 +80,13 @@ Claim-specific history uses these definitions:
 - **Claim correction**: fact-check or counterevidence whose truth label contradicts the origin claim; this transition marks a false claim `corrected`.
 
 The historical endpoints accept bounded tick ranges, branch/run filters, claim ID, status, and topic filters. The Butterfly Lab chart renders persisted control/treatment samples and lets the observer switch between content, exposure, reshare, correction, engagement, and polarization series. Every metric is recomputed from the current state and event log. Values describe a fictional model only.
+
+## Phase 4 dynamic topology
+
+`SimulationConfig` is the additive control surface for Phase 4. `population` is bounded to 1–500. `initial_network.structure` accepts `community`, `ring`, `random`, or `empty`; edge probability, ring degree, homophily, and cross-community seed probability are validated. `max_relationships`, `max_following`, memory limit, and history limit bound per-agent and historical state.
+
+Each agent has a stable behavioral archetype key. `SimulationConfig.archetypes` contains explicit multipliers for post/reply/fact-check/follow/community decisions, relationship formation/decay, homophily, and cross-community bridging. The key is used as a behavior lookup; the human-readable archetype in the browser is only a projection.
+
+Observation and new tie formation use ideology, shared interests, shared communities, and the configured cross-community bridge probability. Existing ties decay toward the agent's trust baseline when not interacted with, and follows adopt or decay through keyed seeded draws. All candidate and output collections are processed in sorted ID order, and relationship/following counts are capped.
+
+Membership changes append `CommunityEvent` records with kinds `join`, `leave`, `split`, and `merge`. Threshold-based split/merge rules operate in stable community order and add one bounded `CommunityHistorySample` per tick. `NetworkHistorySample` stores the current ties and graph metrics per tick. Both histories are included in serialized snapshots and exposed through `/network/history` and `/communities/history`.
